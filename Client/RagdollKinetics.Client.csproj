@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>RagdollKinetics</RootNamespace>
+    <AssemblyName>RagdollKinetics</AssemblyName>
+    <Authors>Hysocs</Authors>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0</AssemblyVersion>
+    <FileVersion>1.0.0</FileVersion>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <SptRoot Condition="'$(SptRoot)' == ''">C:\SPT\4.1.2</SptRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="0Harmony"><HintPath>$(SptRoot)\BepInEx\core\0Harmony.dll</HintPath></Reference>
+    <Reference Include="Assembly-CSharp"><HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\Assembly-CSharp.dll</HintPath></Reference>
+    <Reference Include="BepInEx"><HintPath>$(SptRoot)\BepInEx\core\BepInEx.dll</HintPath></Reference>
+    <Reference Include="UnityEngine"><HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\UnityEngine.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.AnimationModule"><HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\UnityEngine.AnimationModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\UnityEngine.CoreModule.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.PhysicsModule"><HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath></Reference>
+  </ItemGroup>
+  <PropertyGroup>
+    <InstallDir>$(SptRoot)\BepInEx\plugins\Hysocs-RagdollKinetics</InstallDir>
+    <LicenseFile>$(MSBuildProjectDirectory)\..\LICENSE</LicenseFile>
+    <PackageRoot>$(MSBuildProjectDirectory)\..\dist\RagdollKinetics-$(Version)</PackageRoot>
+    <PackageZip>$(MSBuildProjectDirectory)\..\dist\RagdollKinetics-$(Version).zip</PackageZip>
+  </PropertyGroup>
+  <Target Name="DeployClient" AfterTargets="Build" Condition="'$(SkipDeploy)' != 'true'">
+    <MakeDir Directories="$(InstallDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(InstallDir)" SkipUnchangedFiles="false" />
+  </Target>
+  <Target Name="CreateReleasePackage" AfterTargets="CopyFilesToOutputDirectory" Condition="'$(Configuration)' == 'Release' and '$(SkipPackage)' != 'true'">
+    <RemoveDir Directories="$(PackageRoot)" />
+    <Delete Files="$(PackageZip)" />
+    <MakeDir Directories="$(PackageRoot)\BepInEx\plugins\Hysocs-RagdollKinetics" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PackageRoot)\BepInEx\plugins\Hysocs-RagdollKinetics" />
+    <Copy SourceFiles="$(LicenseFile)" DestinationFolder="$(PackageRoot)\BepInEx\plugins\Hysocs-RagdollKinetics" />
+    <ZipDirectory SourceDirectory="$(PackageRoot)" DestinationFile="$(PackageZip)" Overwrite="true" />
+  </Target>
+</Project>
