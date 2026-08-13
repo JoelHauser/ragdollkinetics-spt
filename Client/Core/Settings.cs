@@ -35,7 +35,7 @@ namespace RagdollKinetics
         internal static void Bind(ConfigFile config)
         {
             Enabled = config.Bind(Ragdolls, "Enabled", true, "Enable Ragdoll Kinetics.");
-            BendForce = Range(config, Ragdolls, "SkeletonBendForce", 25f, "Persistent linked-skeleton stiffness; 0 is loose and 200 is fully stiff.", 0f, 200f);
+            BendForce = Range(config, Ragdolls, "SkeletonBendForce", 20f, "Persistent linked-skeleton stiffness; 0 is loose and 200 is fully stiff.", 0f, 200f);
             AnimationCarryDuration = Range(config, Ragdolls, "AnimationCarryDuration", 0.8f, "Seconds for death-pose motion to decay into physics.", 0.1f, 2f);
             AnimationCarryStrength = Range(config, Ragdolls, "AnimationCarryStrength", 4f, "Strength of animation-to-ragdoll guidance.", 0.5f, 10f);
             AnimationSettleDuration = Range(config, Ragdolls, "AnimationSettleDuration", 0.5f, "Residual damping after animation carry.", 0.1f, 1.5f);
@@ -46,8 +46,8 @@ namespace RagdollKinetics
             StabilizeAiAimWhenHit = config.Bind("AI Hit Response", "StabilizeAimWhenHit", true, "Prevent random aim-direction flicks when an AI is hit by its already visible target.");
 
             SupportAndTone = config.Bind(Reactions, "SupportAndTone", true, "Stagger muscle release and make leg force depend on support.");
-            ToneReleaseSpread = Range(config, Reactions, "ToneReleaseSpread", 0.15f, "Maximum random joint tone-release delay.", 0f, 0.6f);
-            UnsupportedLegStrength = Range(config, Reactions, "UnsupportedLegStrength", 100f, "Percent of leg power retained without ground support.", 0f, 100f);
+            ToneReleaseSpread = Range(config, Reactions, "ToneReleaseSpread", 0.125f, "Maximum random joint tone-release delay.", 0f, 0.6f);
+            UnsupportedLegStrength = Range(config, Reactions, "UnsupportedLegStrength", 50f, "Percent of leg power retained without ground support.", 0f, 100f);
             StiffLeg = config.Bind(Reactions, "StiffLeg", true, "Enable random stiff-leg reactions.");
             StiffLegChance = Percentage(config, "StiffLegChance", 45f, "Reaction chance.");
             StiffLegStrengthMin = Percentage(config, "StiffLegStrengthMin", 0f, "Minimum strength.");
