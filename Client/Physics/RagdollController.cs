@@ -199,6 +199,8 @@ namespace RagdollKinetics.Patches
             internal Quaternion StartLocalRotation;
             internal Quaternion JointSpace;
             internal Vector3 AnimationAngularVelocity;
+            internal JointProfile Profile;
+            internal float BaseAngularDrag;
             internal float ReleaseScale;
             internal float DriveScale;
             internal float ToneReleaseDelay;
@@ -206,6 +208,7 @@ namespace RagdollKinetics.Patches
             internal float LastSpring;
             internal float LastMaxForce;
             internal SoftJointLimit CarryLowX, CarryHighX, CarryY, CarryZ;
+            internal SoftJointLimit AuthoredLowX, AuthoredHighX, AuthoredY, AuthoredZ;
             internal SoftJointLimit PassiveLowX, PassiveHighX, PassiveY, PassiveZ;
             internal bool IsStiff;
             internal float StiffIntensity;
@@ -216,6 +219,9 @@ namespace RagdollKinetics.Patches
         private CorpseRagdoll _ragdoll;
         private float _bend;
         private float _forceScale;
+        private float _bendForce = float.NaN;
+        private float _spring;
+        private float _maximumForce;
         private float _nextDebugLog;
         private int _fixedUpdates;
         private float _started;
@@ -242,10 +248,7 @@ namespace RagdollKinetics.Patches
             _settleDuration = Mathf.Max(0.1f,
                 Settings.AnimationSettleDuration.Value);
             _hasRootMotion = sampler != null && sampler.TryGetRoot(out _rootMotion);
-            float forceScale = Mathf.Max(0f,
-                Settings.BendForce.Value / 100f);
-            _forceScale = forceScale;
-            _bend = Mathf.Clamp01(forceScale);
+            RefreshDriveSettings(0f);
 
             foreach (CharacterJointSpawner spawner in ragdoll._jointSpawners)
             {
@@ -256,17 +259,19 @@ namespace RagdollKinetics.Patches
 
                 JointProfile profile = GetProfile(body.name);
                 ConfigurableJoint joint = ConvertJoint(source, profile, _bend,
-                    forceScale);
+                    _forceScale);
                 Bone bone = new Bone
                 {
                     Name = body.name,
                     Body = body,
                     Parent = joint.connectedBody,
                     SourceJoint = source,
-                    Joint = joint
+                    Joint = joint,
+                    Profile = profile,
+                    BaseAngularDrag = body.angularDrag
                 };
                 _bones.Add(bone);
-                ConfigureBody(body, profile, _bend);
+                ConfigureBody(body);
                 Quaternion startLocal = Quaternion.Inverse(
                     joint.connectedBody.rotation) * body.rotation;
                 Quaternion jointSpace = Quaternion.LookRotation(joint.axis,
@@ -283,10 +288,11 @@ namespace RagdollKinetics.Patches
                 bone.CarryHighX = CopyLimit(source.highTwistLimit);
                 bone.CarryY = CopyLimit(source.swing1Limit);
                 bone.CarryZ = CopyLimit(source.swing2Limit);
-                bone.PassiveLowX = joint.lowAngularXLimit;
-                bone.PassiveHighX = joint.highAngularXLimit;
-                bone.PassiveY = joint.angularYLimit;
-                bone.PassiveZ = joint.angularZLimit;
+                bone.AuthoredLowX = bone.CarryLowX;
+                bone.AuthoredHighX = bone.CarryHighX;
+                bone.AuthoredY = bone.CarryY;
+                bone.AuthoredZ = bone.CarryZ;
+                UpdatePassiveProperties(bone);
                 bone.DriveScale = Mathf.Clamp(profile.Damping / 14f, 0.65f, 1.4f);
             }
             ConfigureToneRelease();
@@ -309,7 +315,7 @@ namespace RagdollKinetics.Patches
                 Plugin.Log.LogInfo(string.Format(
                     "[RagdollDebug] Initialized corpse={0} bones={1} spawners={2} force={3:0} scale={4:0.00} physicsDone={5}",
                     name, _bones.Count, ragdoll._jointSpawners.Length,
-                    Settings.BendForce.Value, _forceScale,
+                    _bendForce, _forceScale,
                     ragdoll._isPhysicsDone));
             LogJointState("initial");
             foreach (Bone bone in _bones)
@@ -380,10 +386,8 @@ namespace RagdollKinetics.Patches
             return joint;
         }
 
-        private static void ConfigureBody(Rigidbody body, JointProfile profile, float bend)
+        private static void ConfigureBody(Rigidbody body)
         {
-            body.angularDrag = Mathf.Lerp(body.angularDrag,
-                Mathf.Max(body.angularDrag, profile.AngularDrag), bend);
             body.solverIterations = Mathf.Max(body.solverIterations, 12);
             body.solverVelocityIterations = Mathf.Max(body.solverVelocityIterations, 6);
             body.maxAngularVelocity = Mathf.Min(body.maxAngularVelocity, 12f);
@@ -403,20 +407,13 @@ namespace RagdollKinetics.Patches
                 return;
             }
 
-            float forceScale = Mathf.Max(0f,
-                Settings.BendForce.Value / 100f);
-            _forceScale = forceScale;
-            _bend = Mathf.Clamp01(forceScale);
-            if (_bend <= 0.001f) return;
+            float elapsed = Time.time - _started;
+            RefreshDriveSettings(elapsed);
 
-            float extendedScale = Mathf.Max(1f, forceScale);
-            float spring = 1200f * _bend * _bend * _bend * extendedScale;
-            float damper = 2f * Mathf.Sqrt(spring);
-            float maximumForce = 2500f * extendedScale * extendedScale;
             float carryStrength = Mathf.Max(0.1f,
                 Settings.AnimationCarryStrength.Value);
-            float elapsed = Time.time - _started;
-            DrivePelvis(elapsed, carryStrength);
+            if (_bend > 0.001f)
+                DrivePelvis(elapsed, carryStrength);
             foreach (Bone bone in _bones)
             {
                 if (bone.Body == null || bone.Parent == null || bone.Joint == null)
@@ -461,7 +458,7 @@ namespace RagdollKinetics.Patches
                 bone.LastAngle = Mathf.Abs(angle);
 
                 JointDrive drive = bone.Joint.slerpDrive;
-                float animationSpring = spring * carryStrength;
+                float animationSpring = _spring * carryStrength;
                 if (bone.IsStiff)
                 {
                     float poweredExtensionSpring = Mathf.Lerp(2500f, 24000f,
@@ -473,7 +470,7 @@ namespace RagdollKinetics.Patches
                 drive.positionSpring = animationSpring * bone.DriveScale * influence;
                 drive.positionDamper = animationDamper * bone.DriveScale *
                     Mathf.Max(Mathf.Sqrt(influence), settleInfluence);
-                float driveForce = maximumForce * carryStrength;
+                float driveForce = _maximumForce * carryStrength;
                 if (bone.IsStiff)
                     driveForce = Mathf.Max(driveForce,
                         Mathf.Lerp(12000f, 90000f, bone.StiffIntensity));
@@ -539,6 +536,50 @@ namespace RagdollKinetics.Patches
                 (5f * Mathf.Sqrt(carryStrength));
             _pelvisBody.AddTorque(Vector3.ClampMagnitude(torque, 60f) *
                 settleInfluence, ForceMode.Acceleration);
+        }
+
+        private void RefreshDriveSettings(float elapsed)
+        {
+            float duration = Mathf.Max(0.1f,
+                Settings.BendForceDecayDuration.Value);
+            float progress = Mathf.Clamp01(elapsed / duration);
+            switch (Settings.BendForceDecayCurve.Value)
+            {
+                case Settings.BendDecayCurve.SlowStart:
+                    progress *= progress;
+                    break;
+                case Settings.BendDecayCurve.SlowEnd:
+                    progress = 1f - (1f - progress) * (1f - progress);
+                    break;
+            }
+            float bendForce = Mathf.Lerp(Settings.StartBendForce.Value,
+                Settings.EndBendForce.Value, progress);
+            if (bendForce == _bendForce) return;
+
+            _bendForce = bendForce;
+            _forceScale = Mathf.Max(0f, bendForce / 100f);
+            _bend = Mathf.Clamp01(_forceScale);
+            float extendedScale = Mathf.Max(1f, _forceScale);
+            _spring = 1200f * _bend * _bend * _bend * extendedScale;
+            _maximumForce = 2500f * extendedScale * extendedScale;
+            foreach (Bone bone in _bones)
+                UpdatePassiveProperties(bone);
+        }
+
+        private void UpdatePassiveProperties(Bone bone)
+        {
+            float extendedLimit = 1f / Mathf.Sqrt(Mathf.Max(1f, _forceScale));
+            float twistScale = Mathf.Lerp(1f,
+                bone.Profile.TwistScale * extendedLimit, _bend);
+            float swingScale = Mathf.Lerp(1f,
+                bone.Profile.SwingScale * extendedLimit, _bend);
+
+            bone.PassiveLowX = ScaleLimit(bone.AuthoredLowX, twistScale, true);
+            bone.PassiveHighX = ScaleLimit(bone.AuthoredHighX, twistScale, false);
+            bone.PassiveY = ScaleLimit(bone.AuthoredY, swingScale, false);
+            bone.PassiveZ = ScaleLimit(bone.AuthoredZ, swingScale, false);
+            bone.Body.angularDrag = Mathf.Lerp(bone.BaseAngularDrag,
+                Mathf.Max(bone.BaseAngularDrag, bone.Profile.AngularDrag), _bend);
         }
 
         private void ConfigureStiffReactions()
@@ -644,7 +685,7 @@ namespace RagdollKinetics.Patches
             if (!Settings.DebugLogging.Value) return;
             Plugin.Log.LogInfo(string.Format(
                 "[RagdollDebug] {0} corpse={1} fixed={2} force={3:0} scale={4:0.00} bones={5} physicsDone={6}",
-                phase, name, _fixedUpdates, Settings.BendForce.Value,
+                phase, name, _fixedUpdates, _bendForce,
                 _forceScale, _bones.Count, _ragdoll != null && _ragdoll._isPhysicsDone));
             foreach (Bone bone in _bones)
             {
@@ -705,6 +746,16 @@ namespace RagdollKinetics.Patches
 
         private static SoftJointLimit CopyLimit(SoftJointLimit source)
         {
+            source.bounciness = 0f;
+            return source;
+        }
+
+        private static SoftJointLimit ScaleLimit(SoftJointLimit source,
+            float scale, bool negative)
+        {
+            source.limit = negative
+                ? Mathf.Min(-0.1f, source.limit * scale)
+                : Mathf.Max(0.1f, source.limit * scale);
             source.bounciness = 0f;
             return source;
         }
