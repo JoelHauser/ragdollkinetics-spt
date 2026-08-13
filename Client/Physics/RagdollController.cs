@@ -49,14 +49,16 @@ namespace RagdollKinetics.Patches
         private Vector3 _previousPelvisPosition;
         private Quaternion _previousPelvisRotation;
         private RootMotion _rootMotion;
+        private bool _initialized;
         private bool _hasRootSample;
         private bool _frozen;
 
         internal void Sample(float deltaTime)
         {
             if (_frozen || deltaTime <= 0.0001f) return;
-            if (_spawners == null || _spawners.Length == 0)
+            if (!_initialized)
             {
+                _initialized = true;
                 _player = GetComponent<Player>();
                 _spawners = GetComponentsInChildren<CharacterJointSpawner>(true);
                 RigidbodySpawner[] bodies =
@@ -192,6 +194,7 @@ namespace RagdollKinetics.Patches
             internal string Name;
             internal Rigidbody Body;
             internal Rigidbody Parent;
+            internal CharacterJoint SourceJoint;
             internal ConfigurableJoint Joint;
             internal Quaternion StartLocalRotation;
             internal Quaternion JointSpace;
@@ -209,6 +212,7 @@ namespace RagdollKinetics.Patches
         }
 
         private readonly List<Bone> _bones = new List<Bone>(20);
+        private readonly RaycastHit[] _groundHits = new RaycastHit[16];
         private CorpseRagdoll _ragdoll;
         private float _bend;
         private float _forceScale;
@@ -253,6 +257,15 @@ namespace RagdollKinetics.Patches
                 JointProfile profile = GetProfile(body.name);
                 ConfigurableJoint joint = ConvertJoint(source, profile, _bend,
                     forceScale);
+                Bone bone = new Bone
+                {
+                    Name = body.name,
+                    Body = body,
+                    Parent = joint.connectedBody,
+                    SourceJoint = source,
+                    Joint = joint
+                };
+                _bones.Add(bone);
                 ConfigureBody(body, profile, _bend);
                 Quaternion startLocal = Quaternion.Inverse(
                     joint.connectedBody.rotation) * body.rotation;
@@ -262,27 +275,19 @@ namespace RagdollKinetics.Patches
                 if (sampler != null && sampler.TryGet(body.name,
                     out RagdollPoseSampler.PoseMotion pose))
                     animationVelocity = pose.LocalAngularVelocity;
-                _bones.Add(new Bone
-                {
-                    Name = body.name,
-                    Body = body,
-                    Parent = joint.connectedBody,
-                    Joint = joint,
-                    StartLocalRotation = startLocal,
-                    JointSpace = jointSpace,
-                    AnimationAngularVelocity = animationVelocity,
-                    ReleaseScale = GetReleaseScale(body.name),
-                    CarryLowX = CopyLimit(source.lowTwistLimit),
-                    CarryHighX = CopyLimit(source.highTwistLimit),
-                    CarryY = CopyLimit(source.swing1Limit),
-                    CarryZ = CopyLimit(source.swing2Limit),
-                    PassiveLowX = joint.lowAngularXLimit,
-                    PassiveHighX = joint.highAngularXLimit,
-                    PassiveY = joint.angularYLimit,
-                    PassiveZ = joint.angularZLimit,
-                    DriveScale = Mathf.Clamp(profile.Damping / 14f, 0.65f, 1.4f)
-                });
-                Object.Destroy(source);
+                bone.StartLocalRotation = startLocal;
+                bone.JointSpace = jointSpace;
+                bone.AnimationAngularVelocity = animationVelocity;
+                bone.ReleaseScale = GetReleaseScale(body.name);
+                bone.CarryLowX = CopyLimit(source.lowTwistLimit);
+                bone.CarryHighX = CopyLimit(source.highTwistLimit);
+                bone.CarryY = CopyLimit(source.swing1Limit);
+                bone.CarryZ = CopyLimit(source.swing2Limit);
+                bone.PassiveLowX = joint.lowAngularXLimit;
+                bone.PassiveHighX = joint.highAngularXLimit;
+                bone.PassiveY = joint.angularYLimit;
+                bone.PassiveZ = joint.angularZLimit;
+                bone.DriveScale = Mathf.Clamp(profile.Damping / 14f, 0.65f, 1.4f);
             }
             ConfigureToneRelease();
             ConfigureStiffReactions();
@@ -307,6 +312,11 @@ namespace RagdollKinetics.Patches
                     Settings.BendForce.Value, _forceScale,
                     ragdoll._isPhysicsDone));
             LogJointState("initial");
+            foreach (Bone bone in _bones)
+            {
+                Object.Destroy(bone.SourceJoint);
+                bone.SourceJoint = null;
+            }
         }
 
         private void OnDestroy()
@@ -613,10 +623,12 @@ namespace RagdollKinetics.Patches
                 if (left != selectLeft ||
                     !Has(lower, "calf", "shin", "lowerleg", "foot")) continue;
                 Vector3 origin = bone.Body.worldCenterOfMass + Vector3.up * 0.08f;
-                RaycastHit[] hits = Physics.RaycastAll(origin, Vector3.down, 1.15f,
-                    Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
-                foreach (RaycastHit hit in hits)
+                int hitCount = Physics.RaycastNonAlloc(origin, Vector3.down,
+                    _groundHits, 1.15f, Physics.DefaultRaycastLayers,
+                    QueryTriggerInteraction.Ignore);
+                for (int i = 0; i < hitCount; i++)
                 {
+                    RaycastHit hit = _groundHits[i];
                     if (hit.collider == null) continue;
                     Rigidbody hitBody = hit.collider.attachedRigidbody;
                     if (hitBody == bone.Body || hit.collider.transform.IsChildOf(transform))

@@ -45,9 +45,21 @@ namespace RagdollKinetics.Patches
 
             RagdollPoseSampler sampler =
                 __instance.GetComponent<RagdollPoseSampler>();
-            __instance.gameObject.AddComponent<RagdollSkeleton>()
-                .Initialize(__instance.Ragdoll, sampler);
-            if (sampler != null) Object.Destroy(sampler);
+            RagdollSkeleton controller =
+                __instance.gameObject.AddComponent<RagdollSkeleton>();
+            try
+            {
+                controller.Initialize(__instance.Ragdoll, sampler);
+            }
+            catch (System.Exception exception)
+            {
+                Plugin.Log.LogError(exception);
+                Object.Destroy(controller);
+            }
+            finally
+            {
+                if (sampler != null) Object.Destroy(sampler);
+            }
         }
 
         [HarmonyPatch(typeof(CorpseRagdoll), nameof(CorpseRagdoll.ApplyImpulse),
