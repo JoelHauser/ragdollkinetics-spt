@@ -18,6 +18,8 @@ namespace RagdollKinetics
             Log = Logger;
             Settings.Bind(Config);
             new Harmony(Guid).PatchAll(typeof(Plugin).Assembly);
+            gameObject.AddComponent<RagdollPreviewController>();
+            gameObject.AddComponent<NativeDeathDiagnostics>();
             Logger.LogInfo(Name + " " + Version + " loaded");
         }
     }

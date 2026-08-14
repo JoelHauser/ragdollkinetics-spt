@@ -9,7 +9,7 @@ namespace RagdollKinetics.Patches
     [HarmonyPatch]
     internal static class RagdollPatches
     {
-        // Sample after EFT updates the body animation.
+        // Synchronize the future-animation driver after EFT updates the body.
         [HarmonyPatch(typeof(Player), nameof(Player.BodyUpdate))]
         [HarmonyPostfix]
         private static void SampleAnimatedPose(Player __instance, float deltaTime)
@@ -19,20 +19,46 @@ namespace RagdollKinetics.Patches
                 __instance.ActiveHealthController == null ||
                 !__instance.ActiveHealthController.IsAlive) return;
 
-            RagdollPoseSampler sampler =
-                __instance.GetComponent<RagdollPoseSampler>();
-            if (sampler == null)
-                sampler = __instance.gameObject.AddComponent<RagdollPoseSampler>();
-            sampler.Sample(deltaTime);
+            if (Settings.FutureAnimationDriver.Value)
+            {
+                FutureAnimationDriver future =
+                    __instance.GetComponent<FutureAnimationDriver>();
+                if (future == null)
+                    future = __instance.gameObject
+                        .AddComponent<FutureAnimationDriver>();
+                try { future.Prepare(__instance); }
+                catch (System.Exception exception)
+                {
+                    Plugin.Log.LogError("[FutureAnimation] Prepare failed: " +
+                        exception);
+                    Object.Destroy(future);
+                    future = null;
+                }
+                if (future != null) future.SampleLivingMotion();
+            }
+
         }
 
         [HarmonyPatch(typeof(Player), nameof(Player.OnDead))]
         [HarmonyPrefix]
         private static void FreezeAnimatedPose(Player __instance)
         {
+            NativeDeathDiagnostics.ObserveDeath(__instance);
             if (!Settings.Enabled.Value || __instance == null ||
                 !__instance.IsAI) return;
-            __instance.GetComponent<RagdollPoseSampler>()?.Freeze();
+            if (Settings.FutureAnimationDriver.Value)
+            {
+                try
+                {
+                    __instance.GetComponent<FutureAnimationDriver>()
+                        ?.CaptureAndRun();
+                }
+                catch (System.Exception exception)
+                {
+                    Plugin.Log.LogError("[FutureAnimation] Capture failed: " +
+                        exception);
+                }
+            }
         }
 
         [HarmonyPatch(typeof(Corpse), nameof(Corpse.TryToCreateRagdoll))]
@@ -43,33 +69,49 @@ namespace RagdollKinetics.Patches
                 __instance.Ragdoll == null ||
                 __instance.GetComponent<RagdollSkeleton>() != null) return;
 
-            RagdollPoseSampler sampler =
-                __instance.GetComponent<RagdollPoseSampler>();
+            FutureAnimationDriver future = Settings.FutureAnimationDriver.Value
+                ? __instance.GetComponent<FutureAnimationDriver>() : null;
             RagdollSkeleton controller =
                 __instance.gameObject.AddComponent<RagdollSkeleton>();
             try
             {
-                controller.Initialize(__instance.Ragdoll, sampler);
+                controller.Initialize(__instance.Ragdoll, future);
             }
             catch (System.Exception exception)
             {
                 Plugin.Log.LogError(exception);
                 Object.Destroy(controller);
             }
-            finally
-            {
-                if (sampler != null) Object.Destroy(sampler);
-            }
+        }
+
+        [HarmonyPatch(typeof(Corpse), nameof(Corpse.PlayCorpseDropSound))]
+        [HarmonyPrefix]
+        private static bool SuppressDropSoundDuringAnimation(Corpse __instance)
+        {
+            if (!Settings.Enabled.Value ||
+                !Settings.FutureAnimationDriver.Value || __instance == null)
+                return true;
+            FutureAnimationDriver driver =
+                __instance.GetComponent<FutureAnimationDriver>();
+            return driver == null || !driver.Running;
         }
 
         [HarmonyPatch(typeof(CorpseRagdoll), nameof(CorpseRagdoll.ApplyImpulse),
             new System.Type[] { typeof(Rigidbody), typeof(Vector3), typeof(Vector3),
                 typeof(float) })]
         [HarmonyPrefix]
-        private static void ScaleFatalImpulse(ref float thrust)
+        private static bool ScaleFatalImpulse(CorpseRagdoll __instance,
+            Rigidbody rigidbody, Vector3 direction, Vector3 point,
+            ref float thrust)
         {
-            if (Settings.Enabled.Value)
-                thrust *= Settings.ImpulseScale.Value;
+            if (!Settings.Enabled.Value) return true;
+            RagdollSkeleton skeleton = rigidbody != null
+                ? rigidbody.GetComponentInParent<RagdollSkeleton>() : null;
+            if (skeleton != null && skeleton.CaptureFatalImpulse(rigidbody,
+                direction, point, thrust))
+                return false;
+            thrust *= Settings.ImpulseScale.Value;
+            return true;
         }
 
         // Allow natural sleep until the configured freeze delay expires.

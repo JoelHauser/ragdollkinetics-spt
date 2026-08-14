@@ -5,154 +5,194 @@ namespace RagdollKinetics
 {
     internal static class Settings
     {
-        internal enum BendDecayCurve
+        internal enum PreviewMotion
         {
-            Linear,
-            SlowStart,
-            SlowEnd
+            Standing,
+            Crouching,
+            Walking,
+            Running
+        }
+
+        internal enum DeathMotion
+        {
+            Standing,
+            Crouching,
+            Walking,
+            Running
+        }
+
+        internal sealed class DeathProfile
+        {
+            internal ConfigEntry<float> MomentumScale;
+            internal ConfigEntry<float> MomentumDecay;
+            internal ConfigEntry<float> WorldFollowStrength;
+            internal ConfigEntry<float> WorldFollowDecay;
+            internal ConfigEntry<float> BoneReplayStrength;
+            internal ConfigEntry<float> BoneReplayDecay;
+            internal ConfigEntry<float> BoneReplayMaximumTorque;
+            internal ConfigEntry<float> JointLimitRange;
+            internal ConfigEntry<float> JointLimitStiffness;
         }
 
         private const string Ragdolls = "Ragdolls";
-        private const string Reactions = "Ragdoll Reactions";
+        private const string Preview = "Ragdoll Preview (Debug)";
 
         internal static ConfigEntry<bool> Enabled { get; private set; }
+        internal static ConfigEntry<bool> FutureAnimationDriver { get; private set; }
+        internal static DeathProfile StandingDeath { get; private set; }
+        internal static DeathProfile CrouchingDeath { get; private set; }
+        internal static DeathProfile WalkingDeath { get; private set; }
+        internal static DeathProfile RunningDeath { get; private set; }
         internal static ConfigEntry<bool> DebugLogging { get; private set; }
         internal static ConfigEntry<bool> StabilizeAiAimWhenHit { get; private set; }
-        internal static ConfigEntry<bool> SupportAndTone { get; private set; }
-        internal static ConfigEntry<bool> StiffLeg { get; private set; }
-        internal static ConfigEntry<bool> StiffHip { get; private set; }
-        internal static ConfigEntry<bool> StiffArm { get; private set; }
-        internal static ConfigEntry<float> StartBendForce { get; private set; }
-        internal static ConfigEntry<float> EndBendForce { get; private set; }
-        internal static ConfigEntry<float> BendForceDecayDuration { get; private set; }
-        internal static ConfigEntry<BendDecayCurve> BendForceDecayCurve { get; private set; }
         internal static ConfigEntry<float> ImpulseScale { get; private set; }
-        internal static ConfigEntry<float> AnimationCarryDuration { get; private set; }
-        internal static ConfigEntry<float> AnimationCarryStrength { get; private set; }
-        internal static ConfigEntry<float> AnimationSettleDuration { get; private set; }
+        internal static ConfigEntry<float> FatalPushDecay { get; private set; }
+        internal static ConfigEntry<float> RagdollMassScale { get; private set; }
         internal static ConfigEntry<float> FreezeDelay { get; private set; }
-        internal static ConfigEntry<float> ToneReleaseSpread { get; private set; }
-        internal static ConfigEntry<float> UnsupportedLegStrength { get; private set; }
-        internal static ConfigEntry<float> StiffLegChance { get; private set; }
-        internal static ConfigEntry<float> StiffLegStrengthMin { get; private set; }
-        internal static ConfigEntry<float> StiffLegStrengthMax { get; private set; }
-        internal static ConfigEntry<float> StiffHipChance { get; private set; }
-        internal static ConfigEntry<float> StiffHipStrengthMin { get; private set; }
-        internal static ConfigEntry<float> StiffHipStrengthMax { get; private set; }
-        internal static ConfigEntry<float> StiffArmChance { get; private set; }
-        internal static ConfigEntry<float> StiffArmStrengthMin { get; private set; }
-        internal static ConfigEntry<float> StiffArmStrengthMax { get; private set; }
+        internal static ConfigEntry<bool> PreviewEnabled { get; private set; }
+        internal static ConfigEntry<PreviewMotion> PreviewMode { get; private set; }
+        internal static ConfigEntry<float> PreviewRouteLength { get; private set; }
+        internal static ConfigEntry<float> PreviewCorpseTime { get; private set; }
+        internal static ConfigEntry<float> PreviewPathTime { get; private set; }
+        internal static ConfigEntry<float> PreviewKillTime { get; private set; }
+        internal static ConfigEntry<bool> PreviewDiagnostics { get; private set; }
+        internal static ConfigEntry<bool> NativeDeathDiagnostics { get; private set; }
 
         internal static void Bind(ConfigFile config)
         {
-            BindPresetButton(config, "PresetVanillaPlus", "Vanilla+", 1200,
-                ApplyVanillaPlus);
-            BindPresetButton(config, "PresetRealisticSettle", "Realistic Settle", 1190,
-                ApplyRealisticSettle);
-            BindPresetButton(config, "PresetRealisticPlus", "Realistic+", 1180,
-                ApplyRealisticPlus);
-            Enabled = Toggle(config, Ragdolls, "Enabled", true, "Enable Ragdoll Kinetics.", "Enabled", 1000);
-            BindSeparator(config, "BendForceSeparator", "Bend Force", 950);
-            StartBendForce = Range(config, Ragdolls, "StartBendForce", 200f, "Skeleton stiffness when the ragdoll starts.", 0f, 200f, "Bend Force - Start", 900);
-            EndBendForce = Range(config, Ragdolls, "EndBendForce", 1f, "Skeleton stiffness after the decay finishes.", 0f, 200f, "Bend Force - End", 890);
-            BendForceDecayDuration = Range(config, Ragdolls, "BendForceDecayDuration", 0.55f, "Seconds for bend force to move from its start value to its end value.", 0.1f, 10f, "Bend Force - Decay Time", 880);
-            BendForceDecayCurve = BindDecayCurve(config);
-            BindSeparator(config, "AnimationSeparator", "Animation Carry", 850);
-            AnimationCarryDuration = Range(config, Ragdolls, "AnimationCarryDuration", 0.8f, "Seconds for death-pose motion to decay into physics.", 0.1f, 2f, "Animation Carry Duration", 800);
-            AnimationCarryStrength = Range(config, Ragdolls, "AnimationCarryStrength", 2.5f, "Strength of animation-to-ragdoll guidance.", 0.5f, 10f, "Animation Carry Strength", 790);
-            AnimationSettleDuration = Range(config, Ragdolls, "AnimationSettleDuration", 0.25f, "Residual damping after animation carry.", 0.1f, 1.5f, "Animation Settle Duration", 780);
+            FutureAnimationDriver = Toggle(config, Ragdolls,
+                "FutureAnimationDriver", true,
+                "Continue EFT's locomotion on an invisible skeleton after death and use it as the only animation-follow target for the corpse.",
+                "Future Animation Skeleton", 1200);
+            StandingDeath = BindDeathProfile(config, "Death Profile - Standing",
+                0f, 0.5f, 0f, 0.05f, 45f, 2f, 900f, 1f, 10f);
+            CrouchingDeath = BindDeathProfile(config, "Death Profile - Crouching",
+                0.5f, 0.75f, 0f, 0.05f, 50f, 2.5f, 1000f, 1f, 10f);
+            WalkingDeath = BindDeathProfile(config, "Death Profile - Walking",
+                1f, 4.02f, 115.49f, 0.68f, 100f, 4.04f,
+                1200f, 1f, 10f);
+            RunningDeath = BindDeathProfile(config, "Death Profile - Running",
+                0.55f, 2.73f, 107.04f, 0.83f, 65f, 2.56f,
+                1400f, 1f, 10f);
+            Enabled = Toggle(config, Ragdolls, "Enabled", true, "Enable Ragdoll Kinetics.", "Enabled", 1220);
             BindSeparator(config, "CorpsePhysicsSeparator", "Corpse Physics", 750);
-            FreezeDelay = Range(config, Ragdolls, "FreezeDelay", 10f, "Seconds before EFT freezes corpse physics.", 2f, 60f, "Corpse Freeze Delay", 700);
-            ImpulseScale = Range(config, Ragdolls, "ImpulseScale", 0.35f, "Scale applied to EFT's fatal-shot impulse.", 0f, 1f, "Fatal Impulse Scale", 690);
+            FreezeDelay = Range(config, Ragdolls, "FreezeDelay", 15f, "Seconds before EFT freezes corpse physics.", 2f, 60f, "Corpse Freeze Delay", 700);
+            ImpulseScale = Range(config, Ragdolls, "ImpulseScale", 0.5f, "Scale applied to EFT's fatal-shot impulse and cached puppet push.", 0f, 1f, "Fatal Impulse Scale", 690);
+            FatalPushDecay = Range(config, Ragdolls, "FatalPushDecay", 0.65f,
+                "Seconds for a cached fatal-hit push to lose its velocity.",
+                0.05f, 3f, "Fatal Push Decay", 680);
+            RagdollMassScale = Range(config, Ragdolls,
+                "RagdollMassScale", 1.16f,
+                "Multiplier applied to every ragdoll rigidbody mass while preserving EFT's original per-bone mass ratios.",
+                0.25f, 4f, "Ragdoll Mass Scale", 670);
             DebugLogging = Toggle(config, Ragdolls, "DebugLogging", false, "Write detailed joint diagnostics to the BepInEx log.", "Debug Logging", 100);
+
+            Round(FreezeDelay);
+            Round(ImpulseScale);
+            Round(FatalPushDecay);
+            Round(RagdollMassScale);
 
             StabilizeAiAimWhenHit = config.Bind("AI Hit Response", "StabilizeAimWhenHit", true, "Prevent random aim-direction flicks when an AI is hit by its already visible target.");
 
-            SupportAndTone = config.Bind(Reactions, "SupportAndTone", true, "Stagger muscle release and make leg force depend on support.");
-            ToneReleaseSpread = Range(config, Reactions, "ToneReleaseSpread", 0.125f, "Maximum random joint tone-release delay.", 0f, 0.6f);
-            UnsupportedLegStrength = Range(config, Reactions, "UnsupportedLegStrength", 50f, "Percent of leg power retained without ground support.", 0f, 100f);
-            StiffLeg = config.Bind(Reactions, "StiffLeg", true, "Enable random stiff-leg reactions.");
-            StiffLegChance = Percentage(config, "StiffLegChance", 45f, "Reaction chance.");
-            StiffLegStrengthMin = Percentage(config, "StiffLegStrengthMin", 0f, "Minimum strength.");
-            StiffLegStrengthMax = Percentage(config, "StiffLegStrengthMax", 30f, "Maximum strength.");
-            StiffHip = config.Bind(Reactions, "StiffHip", true, "Enable random stiff-hip reactions.");
-            StiffHipChance = Percentage(config, "StiffHipChance", 30f, "Reaction chance.");
-            StiffHipStrengthMin = Percentage(config, "StiffHipStrengthMin", 0f, "Minimum strength.");
-            StiffHipStrengthMax = Percentage(config, "StiffHipStrengthMax", 30f, "Maximum strength.");
-            StiffArm = config.Bind(Reactions, "StiffArm", true, "Enable random stiff-arm reactions.");
-            StiffArmChance = Percentage(config, "StiffArmChance", 35f, "Reaction chance.");
-            StiffArmStrengthMin = Percentage(config, "StiffArmStrengthMin", 0f, "Minimum strength.");
-            StiffArmStrengthMax = Percentage(config, "StiffArmStrengthMax", 15f, "Maximum strength.");
+            PreviewEnabled = Toggle(config, Preview, "Enabled", false,
+                "Continuously spawn, animate, kill, and clean up one test scav. This works independently of the main Ragdoll Kinetics Enabled setting.",
+                "Enable Preview Loop", 1000);
+            PreviewMode = config.Bind(Preview, "Motion", PreviewMotion.Standing,
+                Description("Animation played immediately before death.", "Motion", 900));
+            PreviewRouteLength = Range(config, Preview, "RouteLength", 10f,
+                "Length of the preview line in metres.", 4f, 20f,
+                "Route Length", 800);
+            PreviewCorpseTime = Range(config, Preview, "CorpseTime", 4f,
+                "Seconds to display each ragdoll before cleanup and respawn.",
+                1f, 15f, "Corpse Display Time", 700);
+            PreviewPathTime = Range(config, Preview, "PathTime", 8f,
+                "Maximum seconds allowed for the bot to travel the displayed path.",
+                1f, 30f, "Path Time", 600);
+            PreviewKillTime = Range(config, Preview, "KillTime", 1.21f,
+                "Seconds after movement begins before the preview bot is killed.",
+                0.25f, 30f, "Kill At Time", 500);
+            PreviewDiagnostics = Toggle(config, Preview, "Diagnostics", false,
+                "Log the preview bot's commanded path and live locomotion state every half-second, and draw its error from the path in red.",
+                "Movement Diagnostics", 400);
+            NativeDeathDiagnostics = Toggle(config, Preview,
+                "NativeDeathDiagnostics", false,
+                "Log Unity native profiler markers for several frames around every AI death. Use this only while diagnosing death-frame stalls.",
+                "Native Death Diagnostics", 300);
+            Round(PreviewRouteLength);
+            Round(PreviewCorpseTime);
+            Round(PreviewPathTime);
+            Round(PreviewKillTime);
         }
 
-        private static void ApplyVanillaPlus()
+        internal static DeathProfile GetDeathProfile(DeathMotion motion)
         {
-            ApplyPreset(25f, 25f, 1.5f, BendDecayCurve.Linear,
-                0.8f, 4f, 0.5f);
+            switch (motion)
+            {
+                case DeathMotion.Crouching: return CrouchingDeath;
+                case DeathMotion.Walking: return WalkingDeath;
+                case DeathMotion.Running: return RunningDeath;
+                default: return StandingDeath;
+            }
         }
 
-        private static void ApplyRealisticSettle()
+        private static DeathProfile BindDeathProfile(ConfigFile config,
+            string section, float momentumScale, float momentumDecay,
+            float worldStrength, float worldDecay, float replayStrength,
+            float replayDecay, float maximumTorque, float limitRange,
+            float limitStiffness)
         {
-            ApplyPreset(30f, 1f, 0.6f, BendDecayCurve.Linear,
-                0.65f, 10f, 0.25f);
+            DeathProfile profile = new DeathProfile();
+            profile.MomentumScale = Range(config, section, "MomentumScale",
+                momentumScale,
+                "Fraction of captured horizontal velocity carried into death.",
+                0f, 2f, "Momentum Scale", 560);
+            profile.MomentumDecay = Range(config, section, "MomentumDecay",
+                momentumDecay,
+                "Seconds for inherited horizontal momentum to decay to zero.",
+                0.05f, 8f, "Momentum Decay", 550);
+            profile.WorldFollowStrength = Range(config, section,
+                "WorldFollowStrength", worldStrength,
+                "Strength pulling each rigidbody toward its animated world position.",
+                0f, 200f, "World Follow Strength", 600);
+            profile.WorldFollowDecay = Range(config, section,
+                "WorldFollowDecay", worldDecay,
+                "Seconds for animated world-position pulling to decay to zero.",
+                0.05f, 8f, "World Follow Decay", 590);
+            profile.BoneReplayStrength = Range(config, section,
+                "BoneReplayStrength", replayStrength,
+                "Relative joint strength used to replay the walk/run pose.",
+                0f, 200f, "Bone Replay Strength", 580);
+            profile.BoneReplayDecay = Range(config, section,
+                "BoneReplayDecay", replayDecay,
+                "Seconds for relative bone animation replay to decay to zero.",
+                0.05f, 8f, "Bone Replay Decay", 570);
+            profile.BoneReplayMaximumTorque = Range(config, section,
+                "BoneReplayMaximumTorque", maximumTorque,
+                "Maximum animation-drive torque per joint. Lower values let collisions bend the pose more easily.",
+                0f, 5000f, "Bone Replay Maximum Torque", 565);
+            profile.JointLimitRange = Range(config, section,
+                "JointLimitRange", limitRange,
+                "Multiplier for anatomical joint bend ranges.",
+                0.5f, 2f, "Joint Limit Range", 540);
+            profile.JointLimitStiffness = Range(config, section,
+                "JointLimitStiffness", limitStiffness,
+                "Resistance applied only when a joint reaches its bend limit.",
+                0f, 100f, "Joint Limit Stiffness", 530);
+            Round(profile.MomentumScale);
+            Round(profile.MomentumDecay);
+            Round(profile.WorldFollowStrength);
+            Round(profile.WorldFollowDecay);
+            Round(profile.BoneReplayStrength);
+            Round(profile.BoneReplayDecay);
+            Round(profile.BoneReplayMaximumTorque);
+            Round(profile.JointLimitRange);
+            Round(profile.JointLimitStiffness);
+            return profile;
         }
 
-        private static void ApplyRealisticPlus()
+        private static void Round(ConfigEntry<float> entry)
         {
-            ApplyPreset(200f, 1f, 0.55f, BendDecayCurve.SlowStart,
-                0.8f, 2.5f, 0.25f);
-        }
-
-        private static void ApplyPreset(float startBend, float endBend,
-            float bendDecay, BendDecayCurve decayCurve, float carryDuration,
-            float carryStrength, float settleDuration)
-        {
-            StartBendForce.Value = startBend;
-            EndBendForce.Value = endBend;
-            BendForceDecayDuration.Value = bendDecay;
-            AnimationCarryDuration.Value = carryDuration;
-            AnimationCarryStrength.Value = carryStrength;
-            AnimationSettleDuration.Value = settleDuration;
-            BendForceDecayCurve.Value = decayCurve;
-            FreezeDelay.Value = 10f;
-            ImpulseScale.Value = 0.35f;
-            SupportAndTone.Value = true;
-            ToneReleaseSpread.Value = 0.125f;
-            UnsupportedLegStrength.Value = 50f;
-            StiffLeg.Value = true;
-            StiffLegChance.Value = 45f;
-            StiffLegStrengthMin.Value = 0f;
-            StiffLegStrengthMax.Value = 30f;
-            StiffHip.Value = true;
-            StiffHipChance.Value = 30f;
-            StiffHipStrengthMin.Value = 0f;
-            StiffHipStrengthMax.Value = 30f;
-            StiffArm.Value = true;
-            StiffArmChance.Value = 35f;
-            StiffArmStrengthMin.Value = 0f;
-            StiffArmStrengthMax.Value = 15f;
-        }
-
-        private static void BindPresetButton(ConfigFile config, string key,
-            string label, int order, System.Action action)
-        {
-            ConfigurationManagerAttributes attributes =
-                new ConfigurationManagerAttributes
-                {
-                    Category = "Ragdoll Presets",
-                    DispName = label,
-                    Order = order,
-                    HideDefaultButton = true,
-                    HideSettingName = true,
-                    CustomDrawer = ignored =>
-                    {
-                        if (GUILayout.Button(label, GUILayout.ExpandWidth(true)))
-                            action();
-                    }
-                };
-            config.Bind(Ragdolls, key, false,
-                new ConfigDescription("Apply the " + label + " preset.",
-                    null, attributes));
+            entry.Value = Mathf.Round(entry.Value * 100f) / 100f;
         }
 
         private static void BindSeparator(ConfigFile config, string key,
@@ -175,54 +215,6 @@ namespace RagdollKinetics
                 };
             config.Bind(Ragdolls, key, false,
                 new ConfigDescription(label, null, attributes));
-        }
-
-        private static ConfigEntry<BendDecayCurve> BindDecayCurve(ConfigFile config)
-        {
-            ConfigEntry<BendDecayCurve> entry = null;
-            ConfigurationManagerAttributes attributes =
-                new ConfigurationManagerAttributes
-                {
-                    DispName = "Bend Force - Decay Curve",
-                    Order = 870,
-                    HideDefaultButton = true,
-                    HideSettingName = true,
-                    CustomDrawer = ignored => DrawDecayCurve(entry)
-                };
-            entry = config.Bind(Ragdolls, "BendForceDecayCurve",
-                BendDecayCurve.SlowStart,
-                new ConfigDescription("Controls how bend force changes over time.",
-                    null, attributes));
-            return entry;
-        }
-
-        private static void DrawDecayCurve(ConfigEntry<BendDecayCurve> entry)
-        {
-            GUILayout.BeginHorizontal();
-            try
-            {
-                DrawCurveButton(entry, BendDecayCurve.Linear, "Linear");
-                DrawCurveButton(entry, BendDecayCurve.SlowStart, "Slow Start");
-                DrawCurveButton(entry, BendDecayCurve.SlowEnd, "Slow End");
-            }
-            finally
-            {
-                GUILayout.EndHorizontal();
-            }
-        }
-
-        private static void DrawCurveButton(ConfigEntry<BendDecayCurve> entry,
-            BendDecayCurve value, string label)
-        {
-            bool selected = entry.Value == value;
-            if (GUILayout.Toggle(selected, label, GUI.skin.button,
-                GUILayout.ExpandWidth(true)) && !selected)
-                entry.Value = value;
-        }
-
-        private static ConfigEntry<float> Percentage(ConfigFile config, string key, float value, string description)
-        {
-            return Range(config, Reactions, key, value, description, 0f, 100f);
         }
 
         private static ConfigEntry<bool> Toggle(ConfigFile config, string section,
