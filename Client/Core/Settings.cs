@@ -48,6 +48,7 @@ namespace RagdollKinetics
         internal static ConfigEntry<float> ImpulseScale { get; private set; }
         internal static ConfigEntry<float> FatalPushDecay { get; private set; }
         internal static ConfigEntry<float> RagdollMassScale { get; private set; }
+        internal static ConfigEntry<bool> TeleportRagdollOnGlitch { get; private set; }
         internal static ConfigEntry<float> FreezeDelay { get; private set; }
         internal static ConfigEntry<bool> PreviewEnabled { get; private set; }
         internal static ConfigEntry<PreviewMotion> PreviewMode { get; private set; }
@@ -85,6 +86,10 @@ namespace RagdollKinetics
                 "RagdollMassScale", 1.16f,
                 "Multiplier applied to every ragdoll rigidbody mass while preserving EFT's original per-bone mass ratios.",
                 0.25f, 4f, "Ragdoll Mass Scale", 670);
+            TeleportRagdollOnGlitch = Toggle(config, Ragdolls,
+                "TeleportRagdollOnGlitch", true,
+                "Return the complete ragdoll to its saved death position if any single bone travels more than 35 metres away.",
+                "Teleport Ragdoll back on glitch", 660);
             DebugLogging = Toggle(config, Ragdolls, "DebugLogging", false, "Write detailed joint diagnostics to the BepInEx log.", "Debug Logging", 100);
 
             Round(FreezeDelay);

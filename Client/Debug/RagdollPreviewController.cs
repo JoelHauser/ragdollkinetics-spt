@@ -20,7 +20,6 @@ using UnityEngine.AI;
 
 namespace RagdollKinetics
 {
-    /// <summary>Owns exactly one disposable preview bot/corpse at a time.</summary>
     internal sealed class RagdollPreviewController : MonoBehaviour
     {
         private static readonly FieldInfo GameEndField =
@@ -119,8 +118,6 @@ namespace RagdollKinetics
                     ? Singleton<GameWorld>.Instance : null;
                 if (world != null && !ReferenceEquals(world, _assetPoolWorld))
                 {
-                    // Raid pools are rebuilt between raids. The visual/loadout
-                    // template remains reusable, but its bundle capacity does not.
                     _warmResources.Clear();
                     _lockedRoute = null;
                     _assetPoolWorld = world;
@@ -178,9 +175,6 @@ namespace RagdollKinetics
                 _profileId = _bot.Profile.Id;
                 Player player = _bot.GetPlayer;
                 player.Teleport(start, false);
-                // IsProfilesLoaded becomes true before SPT finishes loading bot
-                // behaviours/brain weights. Early in a raid a natural activation
-                // can therefore remain PreActive well beyond five seconds.
                 float activationTimeout = Time.realtimeSinceStartup + 30f;
                 float nextActivationDiagnostic = 0f;
                 while (_bot != null && _bot.BotState != EBotState.Active &&
@@ -214,10 +208,6 @@ namespace RagdollKinetics
                     continue;
                 }
                 RagdollPreviewBotPatches.Register(_bot);
-                // Keep EFT's normal active lifecycle intact through death. The
-                // Harmony hooks below suppress brain updates while DrivePlayer
-                // supplies locomotion, so disabling/reactivating the owner is
-                // unnecessary and makes preview deaths unlike shot deaths.
                 _bot.Mover.Stop();
                 yield return new WaitForSeconds(0.25f);
 
@@ -246,9 +236,6 @@ namespace RagdollKinetics
                 {
                     KillPreviewBot(_bot);
                 }
-                // Player.OnDead assigns this synchronously. Keep the direct
-                // reference instead of scanning every loaded Unity object with
-                // FindObjectsOfType<Corpse>() on the death frame.
                 _corpse = GetPlayerCorpse(player);
                 HideErrorLine();
                 RagdollPreviewBotPatches.Unregister(_bot);
@@ -281,9 +268,6 @@ namespace RagdollKinetics
             if (bot == null || bot.Mover == null || bot.IsDead) return;
             Player player = bot.GetPlayer;
             if (player == null || player.MovementContext == null) return;
-            // A BotPathFinder request can complete after BotOwner.Disable and
-            // silently restore an old AI destination. Cancel it every frame;
-            // this driver never consumes BotMover paths.
             bot.Mover.Stop();
             bool moving = mode == Settings.PreviewMotion.Walking ||
                           mode == Settings.PreviewMotion.Running;
@@ -331,8 +315,6 @@ namespace RagdollKinetics
             player.MovementContext.SprintSpeed = sprint ? 2f : 1f;
             player.MovementContext.SetCharacterMovementSpeed(
                 sprint ? 1f : 0.45f, true);
-            // Because the body yaw is explicitly aligned to the world route,
-            // local forward maps exactly to the current NavMesh segment.
             player.Move(Vector2.up);
         }
 
@@ -520,7 +502,7 @@ namespace RagdollKinetics
             }
 
             BotSpawnParams spawnParams = new BotSpawnParams
-                { Id_spawn = "ragdoll-preview-" + Guid.NewGuid().ToString("N") };
+            { Id_spawn = "ragdoll-preview-" + Guid.NewGuid().ToString("N") };
             GetProfileDataParams dataParams = new GetProfileDataParams(
                 profile.Info.Side, profile.Info.Settings.Role,
                 profile.Info.Settings.BotDifficulty, 5f, spawnParams, false);
@@ -597,9 +579,6 @@ namespace RagdollKinetics
             Dictionary<string, string> replacements =
                 new Dictionary<string, string>(StringComparer.Ordinal);
 
-            // EFT requires fresh runtime identities after BotOwner disposal. Remap
-            // identity fields while preserving every template, attachment,
-            // durability value, customization choice, and item relationship.
             foreach (JProperty property in clone.Descendants()
                 .OfType<JProperty>().Where(x => x.Name == "_id" &&
                     x.Value.Type == JTokenType.String).ToArray())
@@ -712,10 +691,11 @@ namespace RagdollKinetics
             Player player = bot != null ? bot.GetPlayer : null;
             if (!IsAlive(player)) return;
 
-            // Enter death through EFT's ordinary lethal-hit path. In particular,
-            // do not call ActiveHealthController.Kill directly: that skips the
-            // player hit bookkeeping that normally precedes OnDead and can leave
-            // the dynamically spawned preview owner in an inconsistent state.
+            PreviewDeathMarker marker =
+                player.GetComponent<PreviewDeathMarker>();
+            if (marker == null)
+                marker = player.gameObject.AddComponent<PreviewDeathMarker>();
+            marker.Arm();
             player.KillMe(EBodyPartColliderType.HeadCommon, 100000f);
         }
 
@@ -753,9 +733,6 @@ namespace RagdollKinetics
         {
             if (corpse == null) yield break;
 
-            // Corpse.Kill() alone returns the player object to its pool while
-            // CorpseRagdoll.WorkingCycle is still using its rigidbodies. Stop
-            // that owner coroutine before dismantling any physics components.
             corpse.StopAllCoroutines();
 
             Patches.RagdollSkeleton kinetics =
@@ -767,8 +744,6 @@ namespace RagdollKinetics
             CorpseRagdoll ragdoll = corpse.Ragdoll;
             if (ragdoll != null)
             {
-                // Do this defensively instead of ForceStopRigidBody; EFT's
-                // implementation assumes every Rigidbody reference is non-null.
                 RigidbodySpawner[] bodies = ragdoll._rigidbodySpawners;
                 if (bodies != null)
                 {
@@ -800,8 +775,6 @@ namespace RagdollKinetics
                         if (body != null) body.Remove();
             }
 
-            // Unity finalizes component destruction at the end of the frame.
-            // Do not make the pooled player available to the next spawn sooner.
             yield return null;
             corpse.Kill();
             yield return null;
@@ -849,10 +822,6 @@ namespace RagdollKinetics
         }
     }
 
-    /// <summary>
-    /// Keeps the preview actor's locomotion alive while suppressing combat,
-    /// cover selection, healing, and all other normal bot decisions.
-    /// </summary>
     [HarmonyPatch]
     internal static class RagdollPreviewBotPatches
     {
@@ -879,8 +848,6 @@ namespace RagdollKinetics
         private static bool UpdateOnlyLocomotion(BotOwner __instance)
         {
             if (__instance == null || !PreviewBots.Contains(__instance)) return true;
-            // RagdollPreviewController drives the underlying Player movement
-            // state directly. Nothing from BotOwner may alter that input.
             return false;
         }
 

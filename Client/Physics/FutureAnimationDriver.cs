@@ -12,10 +12,6 @@ using UnityEngine;
 
 namespace RagdollKinetics.Patches
 {
-    // A renderer-free copy of EFT's body skeleton. It is prepared while the
-    // player is alive, captures the live fast-animator state at death, then
-    // advances only its private playable graph. No Player/AI components or
-    // animation-event consumers are cloned.
     internal sealed class FutureAnimationDriver : MonoBehaviour
     {
         private readonly struct MotionSample
@@ -81,8 +77,6 @@ namespace RagdollKinetics.Patches
                 MotionSample previous =
                     _motionSamples[_motionSamples.Count - 1];
                 float dt = now - previous.Time;
-                // Pool teleports and preview route placement are boundaries,
-                // not locomotion. Start a fresh history at the new position.
                 if (dt <= 0f || Vector3.Distance(previous.Position, position) >
                     Mathf.Max(1.25f, dt * 12f))
                     _motionSamples.Clear();
@@ -99,11 +93,6 @@ namespace RagdollKinetics.Patches
         {
             if (_ready)
             {
-                // Preview corpses can be returned to EFT's Player pool before
-                // the long follow test expires. The same component then wakes
-                // up as a new bot while still owning the previous corpse's
-                // graph and root. A live owner while Running is an unambiguous
-                // pool-reuse boundary, so rebuild everything for this life.
                 bool alive = player != null &&
                     player.ActiveHealthController != null &&
                     player.ActiveHealthController.IsAlive;
@@ -289,8 +278,6 @@ namespace RagdollKinetics.Patches
         {
             if (!_running || !_ready) return;
             if (_physicsDriven) return;
-            // Synchronous death work can make Unity's next deltaTime contain a
-            // large interval in which this graph did not actually run.
             if (Time.frameCount == _captureFrame) return;
             if (_discardFirstPostCaptureUpdate)
             {
@@ -334,8 +321,6 @@ namespace RagdollKinetics.Patches
                 return;
             }
 
-            // Deliberately advance only state time. FastAnimatorProcessor.Update
-            // also executes EFT state behaviours and animation events.
             for (int i = 0; i < _driver.layerCount; i++)
             {
                 FastLayerInfo layer = _driver.FastControllerInfo.GetStateInfo(i);
@@ -430,9 +415,9 @@ namespace RagdollKinetics.Patches
             _sourceMotionRootDeathPosition = _sourceMotionRoot != null
                 ? _sourceMotionRoot.position : _deathRootPosition;
             _deathVelocity = EstimateCachedVelocity();
-            _deathVelocity.y = 0f;
             _deathVelocity = Vector3.ClampMagnitude(_deathVelocity, 10f);
-            float speed = _deathVelocity.magnitude;
+            float speed = new Vector2(_deathVelocity.x,
+                _deathVelocity.z).magnitude;
             _deathMotion = _lastPoseLevel < 0.65f
                 ? Settings.DeathMotion.Crouching
                 : speed < 0.35f
@@ -460,8 +445,6 @@ namespace RagdollKinetics.Patches
             if (_motionSamples.Count - first < 2) first = Mathf.Max(0,
                 _motionSamples.Count - 2);
 
-            // Least-squares slope over the final 0.2 seconds rejects animation
-            // jitter and is not vulnerable to one zeroed death-frame velocity.
             float meanTime = 0f;
             Vector3 meanPosition = Vector3.zero;
             int sampleCount = _motionSamples.Count - first;
@@ -482,11 +465,14 @@ namespace RagdollKinetics.Patches
             }
             if (denominator <= 0.000001f) return Vector3.zero;
             Vector3 result = numerator / denominator;
-            result.y = 0f;
+            float horizontalSpeed = new Vector2(result.x, result.z).magnitude;
+            result.y = horizontalSpeed >= 0.2f
+                ? Mathf.Clamp(result.y,
+                    -Mathf.Min(3f, horizontalSpeed),
+                    Mathf.Min(3f, horizontalSpeed))
+                : 0f;
             result = Vector3.ClampMagnitude(result, 10f);
-            // Prevent animation noise/controller settling from dragging a
-            // standing corpse across the ground.
-            if (result.magnitude < 0.2f) return Vector3.zero;
+            if (horizontalSpeed < 0.2f) return Vector3.zero;
             return result;
         }
 
@@ -497,8 +483,6 @@ namespace RagdollKinetics.Patches
             float duration = Mathf.Max(0.05f,
                 profile.MomentumDecay.Value);
             float x = Mathf.Clamp01(Mathf.Max(0f, elapsed) / duration);
-            // Same integral of the corpse's smooth momentum decay. The cloned
-            // pelvis and physical pelvis now travel along one world path.
             float carriedTime = duration * (x - x * x * x +
                 0.5f * x * x * x * x);
             Vector3 position = _deathRootPosition + _deathVelocity *
@@ -509,9 +493,6 @@ namespace RagdollKinetics.Patches
                     .InverseTransformPoint(_motionRoot.position);
                 Vector3 drift = current - _motionRootReference;
                 drift.y = 0f;
-                // Locomotion clips contain horizontal root-bone travel which
-                // resets every loop. Remove it because world travel is already
-                // supplied by the captured Player velocity.
                 position -= _driverRoot.transform.TransformVector(drift);
             }
             _driverRoot.transform.SetPositionAndRotation(position,

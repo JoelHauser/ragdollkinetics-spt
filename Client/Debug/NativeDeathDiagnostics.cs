@@ -215,8 +215,6 @@ namespace RagdollKinetics
                     UninstallPlayerLoopTracing();
                 return;
             }
-            // Discover while the option is enabled but before a death, so marker
-            // enumeration cannot contaminate the frame being investigated.
             if (!_discovered)
                 DiscoverMarkers();
             if (!ContainsLoopBoundary(PlayerLoop.GetCurrentPlayerLoop()))

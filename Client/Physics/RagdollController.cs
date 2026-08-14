@@ -225,6 +225,8 @@ namespace RagdollKinetics.Patches
         private FutureAnimationDriver _futureAnimation;
         private Settings.DeathProfile _profile;
         private readonly List<Rigidbody> _bodies = new List<Rigidbody>(20);
+        private readonly Dictionary<Rigidbody, Vector3> _deathOffsets =
+            new Dictionary<Rigidbody, Vector3>(20);
         private float _nextDebugLog;
         private int _fixedUpdates;
         private float _started;
@@ -238,6 +240,8 @@ namespace RagdollKinetics.Patches
         private float _fatalPushAge;
         private Vector3 _lastPelvisDebugPosition;
         private float _lastPelvisDebugTime;
+        private Vector3 _deathPosition;
+        private bool _hasDeathPosition;
         internal bool AllowFreeze
         {
             get
@@ -337,6 +341,7 @@ namespace RagdollKinetics.Patches
                 body.angularVelocity = Vector3.zero;
 
             }
+            CaptureDeathPosition();
             _bones.Sort((left, right) => GetBoneDepth(left).CompareTo(
                 GetBoneDepth(right)));
             InitializeBodyFollowers();
@@ -368,6 +373,7 @@ namespace RagdollKinetics.Patches
             _bones.Clear();
             _followers.Clear();
             _bodies.Clear();
+            _deathOffsets.Clear();
         }
 
         private static ConfigurableJoint ConvertJoint(CharacterJoint source,
@@ -428,10 +434,6 @@ namespace RagdollKinetics.Patches
         private static Quaternion BuildJointSpace(Vector3 axis,
             Vector3 secondaryAxis)
         {
-            // ConfigurableJoint.axis is joint-space right, not forward.
-            // LookRotation(axis, secondaryAxis) therefore rotates every target
-            // into the wrong basis. Construct Unity's documented orthonormal
-            // joint frame explicitly.
             Vector3 right = axis.sqrMagnitude > 0.0001f
                 ? axis.normalized : Vector3.right;
             Vector3 forward = Vector3.Cross(right, secondaryAxis);
@@ -465,11 +467,11 @@ namespace RagdollKinetics.Patches
                 return;
             }
 
-            // Discard the backlog Unity accumulated while synchronous death
-            // creation blocked the frame. The ragdoll did not exist then.
             if (_firstPhysicsFrame < 0)
                 _firstPhysicsFrame = Time.frameCount;
             if (Time.frameCount == _firstPhysicsFrame) return;
+
+            RecoverGlitchedRagdoll();
 
             _futureAnimation?.StepPhysics(Time.fixedDeltaTime);
             _physicsElapsed += Time.fixedDeltaTime;
@@ -490,11 +492,6 @@ namespace RagdollKinetics.Patches
                     bone.AnimationParentTarget != null;
                 float followStrength = futureTarget
                     ? boneReplayStrength : 0f;
-                // Measure between the two animated rigidbody bones, not the
-                // target Transform's immediate parent. EFT inserts clavicle,
-                // twist and helper bones which do not exist in its ragdoll.
-                // This relative rotation folds that entire helper chain into
-                // the one physical joint and remains independent of world pose.
                 Quaternion animatedLocal = futureTarget
                     ? Quaternion.Inverse(bone.AnimationParentTarget.rotation) *
                         bone.AnimationTarget.rotation
@@ -621,6 +618,57 @@ namespace RagdollKinetics.Patches
             }
         }
 
+        private void CaptureDeathPosition()
+        {
+            Rigidbody anchor = _pelvisBody;
+            if (anchor == null && _bodies.Count > 0) anchor = _bodies[0];
+            if (anchor == null || !IsFinite(anchor.position)) return;
+
+            _deathPosition = anchor.position;
+            _hasDeathPosition = true;
+            foreach (Rigidbody body in _bodies)
+                if (body != null && IsFinite(body.position))
+                    _deathOffsets[body] = body.position - _deathPosition;
+        }
+
+        private void RecoverGlitchedRagdoll()
+        {
+            if (!Settings.TeleportRagdollOnGlitch.Value || !_hasDeathPosition)
+                return;
+
+            const float maximumDistanceSquared = 35f * 35f;
+            bool glitched = false;
+            foreach (Rigidbody body in _bodies)
+            {
+                if (body == null) continue;
+                Vector3 position = body.position;
+                if (!IsFinite(position) ||
+                    (position - _deathPosition).sqrMagnitude > maximumDistanceSquared)
+                {
+                    glitched = true;
+                    break;
+                }
+            }
+            if (!glitched) return;
+
+            foreach (Rigidbody body in _bodies)
+            {
+                if (body == null || !_deathOffsets.TryGetValue(body,
+                    out Vector3 offset)) continue;
+                body.position = _deathPosition + offset;
+                body.velocity = Vector3.zero;
+                body.angularVelocity = Vector3.zero;
+                body.WakeUp();
+            }
+            _remainingInheritedMomentum = Vector3.zero;
+            _initialInheritedMomentum = Vector3.zero;
+            _fatalPushVelocity = Vector3.zero;
+            _fatalPushInitialVelocity = Vector3.zero;
+            if (Settings.DebugLogging.Value)
+                Plugin.Log.LogWarning("[RagdollDebug] Recovered glitched ragdoll " +
+                    name + " at " + _deathPosition);
+        }
+
         private void ApplyBodyFollowing(float strength)
         {
             float driveScale = Mathf.Max(0f, strength / 100f);
@@ -645,8 +693,6 @@ namespace RagdollKinetics.Patches
                     follower.LastTargetPosition = targetPosition;
                     follower.SampleAge = 0f;
                 }
-                // Gravity compensation is essential: without it the body must
-                // sag substantially before a position spring can support it.
                 Vector3 acceleration = -Physics.gravity * gravityInfluence +
                     (targetPosition - follower.Body.worldCenterOfMass) * spring +
                     (follower.TargetVelocity + _fatalPushVelocity -
@@ -671,9 +717,6 @@ namespace RagdollKinetics.Patches
             Vector3 direction, Vector3 point, float thrust)
         {
             if (direction.sqrMagnitude < 0.0001f || thrust <= 0f) return false;
-            // EFT's thrust is an instantaneous per-bone impulse. Converting it
-            // directly into root velocity is far too energetic, so retain only
-            // a small fraction for the animation-owned pelvis displacement.
             Vector3 push = direction.normalized * thrust *
                 Settings.ImpulseScale.Value * 0.2f;
             _fatalPushVelocity = Vector3.ClampMagnitude(
@@ -777,21 +820,21 @@ namespace RagdollKinetics.Patches
         {
             string name = (boneName ?? string.Empty).ToLowerInvariant();
             if (Has(name, "calf", "shin", "lowerleg"))
-                return new JointProfile(0.28f, 0.22f, 2.8f, 18f); // knee
+                return new JointProfile(0.28f, 0.22f, 2.8f, 18f);
             if (Has(name, "forearm", "lowerarm"))
-                return new JointProfile(0.35f, 0.28f, 2.3f, 15f); // elbow
+                return new JointProfile(0.35f, 0.28f, 2.3f, 15f);
             if (Has(name, "thigh", "upleg"))
-                return new JointProfile(0.55f, 0.58f, 2.2f, 14f); // hip
+                return new JointProfile(0.55f, 0.58f, 2.2f, 14f);
             if (Has(name, "upperarm", "shoulder"))
-                return new JointProfile(0.58f, 0.62f, 1.8f, 12f); // shoulder
+                return new JointProfile(0.58f, 0.62f, 1.8f, 12f);
             if (Has(name, "hand", "wrist"))
-                return new JointProfile(0.38f, 0.35f, 1.7f, 10f); // wrist
+                return new JointProfile(0.38f, 0.35f, 1.7f, 10f);
             if (Has(name, "foot", "ankle"))
-                return new JointProfile(0.32f, 0.28f, 2.0f, 13f); // ankle
+                return new JointProfile(0.32f, 0.28f, 2.0f, 13f);
             if (Has(name, "head", "neck"))
-                return new JointProfile(0.42f, 0.45f, 1.6f, 11f); // neck
+                return new JointProfile(0.42f, 0.45f, 1.6f, 11f);
             if (Has(name, "spine", "chest", "rib", "pelvis"))
-                return new JointProfile(0.38f, 0.42f, 3.0f, 20f); // torso
+                return new JointProfile(0.38f, 0.42f, 3.0f, 20f);
             return new JointProfile(0.50f, 0.50f, 2.0f, 12f);
         }
 
@@ -811,20 +854,16 @@ namespace RagdollKinetics.Patches
             return source;
         }
 
-        private static SoftJointLimit LerpLimit(SoftJointLimit from,
-            SoftJointLimit to, float t)
-        {
-            SoftJointLimit result = to;
-            result.limit = Mathf.Lerp(from.limit, to.limit, t);
-            result.contactDistance = Mathf.Lerp(from.contactDistance,
-                to.contactDistance, t);
-            result.bounciness = 0f;
-            return result;
-        }
-
         private static float SmoothStep(float value)
         {
             return value * value * (3f - 2f * value);
+        }
+
+        private static bool IsFinite(Vector3 value)
+        {
+            return !float.IsNaN(value.x) && !float.IsInfinity(value.x) &&
+                !float.IsNaN(value.y) && !float.IsInfinity(value.y) &&
+                !float.IsNaN(value.z) && !float.IsInfinity(value.z);
         }
 
         private static bool Has(string value, params string[] fragments)

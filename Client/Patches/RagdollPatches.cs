@@ -9,7 +9,6 @@ namespace RagdollKinetics.Patches
     [HarmonyPatch]
     internal static class RagdollPatches
     {
-        // Synchronize the future-animation driver after EFT updates the body.
         [HarmonyPatch(typeof(Player), nameof(Player.BodyUpdate))]
         [HarmonyPostfix]
         private static void SampleAnimatedPose(Player __instance, float deltaTime)
@@ -36,7 +35,6 @@ namespace RagdollKinetics.Patches
                 }
                 if (future != null) future.SampleLivingMotion();
             }
-
         }
 
         [HarmonyPatch(typeof(Player), nameof(Player.OnDead))]
@@ -104,6 +102,10 @@ namespace RagdollKinetics.Patches
             Rigidbody rigidbody, Vector3 direction, Vector3 point,
             ref float thrust)
         {
+            PreviewDeathMarker previewMarker = rigidbody != null
+                ? rigidbody.GetComponentInParent<PreviewDeathMarker>() : null;
+            if (previewMarker != null && previewMarker.SuppressImpulse)
+                return false;
             if (!Settings.Enabled.Value) return true;
             RagdollSkeleton skeleton = rigidbody != null
                 ? rigidbody.GetComponentInParent<RagdollSkeleton>() : null;
@@ -114,7 +116,6 @@ namespace RagdollKinetics.Patches
             return true;
         }
 
-        // Allow natural sleep until the configured freeze delay expires.
         [HarmonyPatch(typeof(PlayerRigidbodySleepHierarchy),
             nameof(PlayerRigidbodySleepHierarchy.TryPutToSleep))]
         [HarmonyPrefix]
