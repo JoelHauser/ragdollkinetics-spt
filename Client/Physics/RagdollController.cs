@@ -39,9 +39,9 @@ namespace RagdollKinetics.Patches
             }
         }
 
-        private readonly Dictionary<string, Quaternion> _previous =
+        private readonly Dictionary<string, Quaternion> _previousBoneRotations =
             new Dictionary<string, Quaternion>(20);
-        private readonly Dictionary<string, PoseMotion> _motion =
+        private readonly Dictionary<string, PoseMotion> _boneMotionByName =
             new Dictionary<string, PoseMotion>(20);
         private CharacterJointSpawner[] _spawners;
         private Transform _pelvis;
@@ -50,26 +50,13 @@ namespace RagdollKinetics.Patches
         private Quaternion _previousPelvisRotation;
         private RootMotion _rootMotion;
         private bool _initialized;
-        private bool _hasRootSample;
+        private bool _hasRootMotion;
         private bool _frozen;
 
-        internal void Sample(float deltaTime)
+        internal void CapturePoseMotion(float deltaTime)
         {
             if (_frozen || deltaTime <= 0.0001f) return;
-            if (!_initialized)
-            {
-                _initialized = true;
-                _player = GetComponent<Player>();
-                _spawners = GetComponentsInChildren<CharacterJointSpawner>(true);
-                RigidbodySpawner[] bodies =
-                    GetComponentsInChildren<RigidbodySpawner>(true);
-                foreach (RigidbodySpawner body in bodies)
-                    if (body != null && body.name.ToLowerInvariant().Contains("pelvis"))
-                    {
-                        _pelvis = body.transform;
-                        break;
-                    }
-            }
+            if (!_initialized) InitializePoseCapture();
 
             float inverseDelta = 1f / deltaTime;
             foreach (CharacterJointSpawner spawner in _spawners)
@@ -78,7 +65,8 @@ namespace RagdollKinetics.Patches
                 string key = spawner.gameObject.name;
                 Quaternion current = spawner.transform.localRotation;
                 Vector3 angularVelocity = Vector3.zero;
-                if (_previous.TryGetValue(key, out Quaternion previous))
+                if (_previousBoneRotations.TryGetValue(key,
+                    out Quaternion previous))
                 {
                     Quaternion delta = current * Quaternion.Inverse(previous);
                     delta.ToAngleAxis(out float angle, out Vector3 axis);
@@ -88,7 +76,8 @@ namespace RagdollKinetics.Patches
                     {
                         Vector3 measured = axis.normalized * angle * inverseDelta;
                         if (Mathf.Abs(angle) > 18f) measured = Vector3.zero;
-                        if (_motion.TryGetValue(key, out PoseMotion prior))
+                        if (_boneMotionByName.TryGetValue(key,
+                            out PoseMotion prior))
                             angularVelocity = Vector3.Lerp(
                                 prior.LocalAngularVelocity, measured, 0.35f);
                         else
@@ -96,20 +85,37 @@ namespace RagdollKinetics.Patches
                     }
                 }
                 angularVelocity = Vector3.ClampMagnitude(angularVelocity, 240f);
-                _previous[key] = current;
-                _motion[key] = new PoseMotion(current, angularVelocity);
+                _previousBoneRotations[key] = current;
+                _boneMotionByName[key] = new PoseMotion(current, angularVelocity);
             }
-            SampleRoot(deltaTime);
+            CaptureRootMotion(deltaTime);
         }
 
-        private void SampleRoot(float deltaTime)
+        private void InitializePoseCapture()
+        {
+            _initialized = true;
+            _player = GetComponent<Player>();
+            _spawners = GetComponentsInChildren<CharacterJointSpawner>(true);
+
+            foreach (RigidbodySpawner body in
+                GetComponentsInChildren<RigidbodySpawner>(true))
+            {
+                if (body == null ||
+                    !body.name.ToLowerInvariant().Contains("pelvis")) continue;
+
+                _pelvis = body.transform;
+                break;
+            }
+        }
+
+        private void CaptureRootMotion(float deltaTime)
         {
             if (_pelvis == null) return;
             Vector3 position = _pelvis.position;
             Quaternion rotation = _pelvis.rotation;
             Vector3 horizontalVelocity = Vector3.zero;
             float yawVelocity = 0f;
-            if (_hasRootSample)
+            if (_hasRootMotion)
             {
                 horizontalVelocity = _player != null
                     ? _player.Velocity
@@ -118,7 +124,7 @@ namespace RagdollKinetics.Patches
                 horizontalVelocity = Vector3.ClampMagnitude(horizontalVelocity, 8f);
                 Quaternion heading = _player != null
                     ? _player.Transform.rotation : rotation;
-                Quaternion previousHeading = _hasRootSample && _player == null
+                Quaternion previousHeading = _hasRootMotion && _player == null
                     ? _previousPelvisRotation : _rootMotion.Rotation;
                 Vector3 oldForward = Vector3.ProjectOnPlane(
                     previousHeading * Vector3.forward, Vector3.up);
@@ -140,20 +146,20 @@ namespace RagdollKinetics.Patches
                 _player != null ? _player.PoseLevel : 1f);
             _previousPelvisPosition = position;
             _previousPelvisRotation = rotation;
-            _hasRootSample = true;
+            _hasRootMotion = true;
         }
 
-        internal void Freeze() { _frozen = true; }
+        internal void FreezePoseCapture() { _frozen = true; }
 
-        internal bool TryGet(string name, out PoseMotion motion)
+        internal bool TryGetBoneMotion(string boneName, out PoseMotion motion)
         {
-            return _motion.TryGetValue(name, out motion);
+            return _boneMotionByName.TryGetValue(boneName, out motion);
         }
 
-        internal bool TryGetRoot(out RootMotion motion)
+        internal bool TryGetRootMotion(out RootMotion motion)
         {
             motion = _rootMotion;
-            return _hasRootSample;
+            return _hasRootMotion;
         }
 
         private static bool IsFinite(float value)
@@ -251,7 +257,7 @@ namespace RagdollKinetics.Patches
             }
         }
 
-        internal void Initialize(CorpseRagdoll ragdoll,
+        internal void InitializeRagdoll(CorpseRagdoll ragdoll,
             FutureAnimationDriver futureAnimation = null)
         {
             _ragdoll = ragdoll;
@@ -264,54 +270,8 @@ namespace RagdollKinetics.Patches
 
             foreach (CharacterJointSpawner spawner in ragdoll._jointSpawners)
             {
-                CharacterJoint source = spawner.Create() as CharacterJoint;
-                if (source == null || source.connectedBody == null) continue;
-                Rigidbody body = source.GetComponent<Rigidbody>();
-                if (body == null) continue;
-
-                JointProfile profile = GetProfile(body.name);
-                ConfigurableJoint joint = ConvertJoint(source, profile, 0f, 0f);
-                Bone bone = new Bone
-                {
-                    Name = body.name,
-                    Body = body,
-                    Parent = joint.connectedBody,
-                    SourceJoint = source,
-                    Joint = joint,
-                    Profile = profile,
-                    BaseAngularDrag = body.angularDrag
-                };
-                _bones.Add(bone);
-                ConfigureBody(body);
-                Quaternion startLocal = Quaternion.Inverse(
-                    joint.connectedBody.rotation) * body.rotation;
-                Quaternion jointSpace = BuildJointSpace(joint.axis,
-                    joint.secondaryAxis);
-                bone.StartLocalRotation = startLocal;
-                bone.JointSpace = jointSpace;
-                if (_futureAnimation != null &&
-                    _futureAnimation.TryGetTarget(body.name,
-                        out Transform animationTarget))
-                {
-                    bone.AnimationTarget = animationTarget;
-                    _futureAnimation.TryGetTarget(joint.connectedBody.name,
-                        out bone.AnimationParentTarget);
-                    if (bone.AnimationParentTarget != null)
-                        bone.AnimationStartLocal = Quaternion.Inverse(
-                            bone.AnimationParentTarget.rotation) *
-                            bone.AnimationTarget.rotation;
-                }
-                bone.CarryLowX = CopyLimit(source.lowTwistLimit);
-                bone.CarryHighX = CopyLimit(source.highTwistLimit);
-                bone.CarryY = CopyLimit(source.swing1Limit);
-                bone.CarryZ = CopyLimit(source.swing2Limit);
-                bone.AuthoredLowX = bone.CarryLowX;
-                bone.AuthoredHighX = bone.CarryHighX;
-                bone.AuthoredY = bone.CarryY;
-                bone.AuthoredZ = bone.CarryZ;
-                ConfigureJointLimits(bone);
-                UpdatePassiveProperties(bone, 0f, 0f);
-                bone.DriveScale = Mathf.Clamp(profile.Damping / 14f, 0.65f, 1.4f);
+                Bone bone = CreateBone(spawner);
+                if (bone != null) _bones.Add(bone);
             }
             _remainingInheritedMomentum = _futureAnimation != null
                 ? _futureAnimation.TravelVelocity * _profile.MomentumScale.Value
@@ -322,24 +282,7 @@ namespace RagdollKinetics.Patches
             {
                 Rigidbody body = spawner.Rigidbody;
                 if (body == null) continue;
-                body.solverIterations = Mathf.Max(body.solverIterations, 12);
-                body.solverVelocityIterations = Mathf.Max(
-                    body.solverVelocityIterations, 6);
-                body.maxAngularVelocity = Mathf.Min(
-                    body.maxAngularVelocity, 12f);
-                body.mass *= Settings.RagdollMassScale.Value;
-                body.drag = Mathf.Max(body.drag, 0.08f);
-                body.interpolation = RigidbodyInterpolation.Interpolate;
-                body.isKinematic = false;
-                body.detectCollisions = true;
-                _bodies.Add(body);
-                string lowerName = body.name.ToLowerInvariant();
-                if (_pelvisBody == null && lowerName.Contains("pelvis"))
-                    _pelvisBody = body;
-                body.velocity = new Vector3(_remainingInheritedMomentum.x,
-                    body.velocity.y, _remainingInheritedMomentum.z);
-                body.angularVelocity = Vector3.zero;
-
+                InitializeBody(body);
             }
             CaptureDeathPosition();
             _bones.Sort((left, right) => GetBoneDepth(left).CompareTo(
@@ -363,6 +306,86 @@ namespace RagdollKinetics.Patches
                 Object.Destroy(bone.SourceJoint);
                 bone.SourceJoint = null;
             }
+        }
+
+        private Bone CreateBone(CharacterJointSpawner spawner)
+        {
+            CharacterJoint source = spawner.Create() as CharacterJoint;
+            if (source == null || source.connectedBody == null) return null;
+
+            Rigidbody body = source.GetComponent<Rigidbody>();
+            if (body == null) return null;
+
+            JointProfile profile = GetJointProfile(body.name);
+            ConfigurableJoint joint = ConvertJoint(source, profile, 0f, 0f);
+            Bone bone = new Bone
+            {
+                Name = body.name,
+                Body = body,
+                Parent = joint.connectedBody,
+                SourceJoint = source,
+                Joint = joint,
+                Profile = profile,
+                BaseAngularDrag = body.angularDrag,
+                StartLocalRotation = Quaternion.Inverse(
+                    joint.connectedBody.rotation) * body.rotation,
+                JointSpace = BuildJointSpace(joint.axis, joint.secondaryAxis),
+                CarryLowX = CreateNonBouncingLimit(source.lowTwistLimit),
+                CarryHighX = CreateNonBouncingLimit(source.highTwistLimit),
+                CarryY = CreateNonBouncingLimit(source.swing1Limit),
+                CarryZ = CreateNonBouncingLimit(source.swing2Limit),
+                DriveScale = Mathf.Clamp(profile.Damping / 14f, 0.65f, 1.4f)
+            };
+
+            ConfigureBody(body);
+            ConfigureAnimationTargets(bone);
+            CopyAuthoredLimits(bone);
+            ConfigureJointLimits(bone);
+            UpdatePassiveProperties(bone, 0f, 0f);
+            return bone;
+        }
+
+        private void ConfigureAnimationTargets(Bone bone)
+        {
+            if (_futureAnimation == null ||
+                !_futureAnimation.TryGetAnimationTarget(bone.Name,
+                    out Transform animationTarget)) return;
+
+            bone.AnimationTarget = animationTarget;
+            _futureAnimation.TryGetAnimationTarget(bone.Parent.name,
+                out bone.AnimationParentTarget);
+            if (bone.AnimationParentTarget == null) return;
+
+            bone.AnimationStartLocal = Quaternion.Inverse(
+                bone.AnimationParentTarget.rotation) *
+                bone.AnimationTarget.rotation;
+        }
+
+        private static void CopyAuthoredLimits(Bone bone)
+        {
+            bone.AuthoredLowX = bone.CarryLowX;
+            bone.AuthoredHighX = bone.CarryHighX;
+            bone.AuthoredY = bone.CarryY;
+            bone.AuthoredZ = bone.CarryZ;
+        }
+
+        private void InitializeBody(Rigidbody body)
+        {
+            ConfigureBody(body);
+            body.mass *= Settings.RagdollMassScale.Value;
+            body.drag = Mathf.Max(body.drag, 0.08f);
+            body.interpolation = RigidbodyInterpolation.Interpolate;
+            body.isKinematic = false;
+            body.detectCollisions = true;
+            _bodies.Add(body);
+
+            if (_pelvisBody == null &&
+                body.name.ToLowerInvariant().Contains("pelvis"))
+                _pelvisBody = body;
+
+            body.velocity = new Vector3(_remainingInheritedMomentum.x,
+                body.velocity.y, _remainingInheritedMomentum.z);
+            body.angularVelocity = Vector3.zero;
         }
 
         private void OnDestroy()
@@ -409,22 +432,14 @@ namespace RagdollKinetics.Patches
             float swingScale = Mathf.Lerp(1f,
                 profile.SwingScale * extendedLimit, bend);
 
-            SoftJointLimit low = source.lowTwistLimit;
-            low.limit = Mathf.Min(-0.1f, low.limit * twistScale);
-            low.bounciness = 0f;
-            joint.lowAngularXLimit = low;
-            SoftJointLimit high = source.highTwistLimit;
-            high.limit = Mathf.Max(0.1f, high.limit * twistScale);
-            high.bounciness = 0f;
-            joint.highAngularXLimit = high;
-            SoftJointLimit swing1 = source.swing1Limit;
-            swing1.limit = Mathf.Max(0.1f, swing1.limit * swingScale);
-            swing1.bounciness = 0f;
-            joint.angularYLimit = swing1;
-            SoftJointLimit swing2 = source.swing2Limit;
-            swing2.limit = Mathf.Max(0.1f, swing2.limit * swingScale);
-            swing2.bounciness = 0f;
-            joint.angularZLimit = swing2;
+            joint.lowAngularXLimit = CreateScaledLimit(
+                source.lowTwistLimit, twistScale, true);
+            joint.highAngularXLimit = CreateScaledLimit(
+                source.highTwistLimit, twistScale, false);
+            joint.angularYLimit = CreateScaledLimit(
+                source.swing1Limit, swingScale, false);
+            joint.angularZLimit = CreateScaledLimit(
+                source.swing2Limit, swingScale, false);
             joint.rotationDriveMode = RotationDriveMode.Slerp;
             joint.configuredInWorldSpace = false;
             joint.swapBodies = false;
@@ -482,34 +497,11 @@ namespace RagdollKinetics.Patches
             bool futureActive = _futureAnimation != null &&
                 _futureAnimation.Running;
             UpdateFatalPush();
-            ApplyBodyFollowing(futureActive ? worldFollowStrength : 0f);
+            DriveBodiesTowardAnimation(
+                futureActive ? worldFollowStrength : 0f);
             foreach (Bone bone in _bones)
             {
-                if (bone.Body == null || bone.Parent == null || bone.Joint == null)
-                    continue;
-                bool futureTarget = futureActive &&
-                    bone.AnimationTarget != null &&
-                    bone.AnimationParentTarget != null;
-                float followStrength = futureTarget
-                    ? boneReplayStrength : 0f;
-                Quaternion animatedLocal = futureTarget
-                    ? Quaternion.Inverse(bone.AnimationParentTarget.rotation) *
-                        bone.AnimationTarget.rotation
-                    : bone.StartLocalRotation;
-                if (bone.HasPreviousAnimatedLocal)
-                    bone.LastTargetMotion = Quaternion.Angle(
-                        bone.PreviousAnimatedLocal, animatedLocal);
-                bone.PreviousAnimatedLocal = animatedLocal;
-                bone.HasPreviousAnimatedLocal = true;
-                Quaternion currentLocal = Quaternion.Inverse(bone.Parent.rotation) *
-                    bone.Body.rotation;
-                Quaternion error = animatedLocal *
-                    Quaternion.Inverse(currentLocal);
-                error.ToAngleAxis(out float angle, out _);
-                if (angle > 180f) angle -= 360f;
-                bone.LastAngle = Mathf.Abs(angle);
-
-                ApplyAnimationDrive(bone, animatedLocal, followStrength);
+                UpdateBoneDrive(bone, futureActive, boneReplayStrength);
             }
 
             if (Settings.DebugLogging.Value && Time.unscaledTime >= _nextDebugLog)
@@ -517,6 +509,37 @@ namespace RagdollKinetics.Patches
                 _nextDebugLog = Time.unscaledTime + 1f;
                 LogJointState("live");
             }
+        }
+
+        private void UpdateBoneDrive(Bone bone, bool futureActive,
+            float replayStrength)
+        {
+            if (bone.Body == null || bone.Parent == null || bone.Joint == null)
+                return;
+
+            bool hasFutureTarget = futureActive &&
+                bone.AnimationTarget != null &&
+                bone.AnimationParentTarget != null;
+            Quaternion animatedLocal = hasFutureTarget
+                ? Quaternion.Inverse(bone.AnimationParentTarget.rotation) *
+                    bone.AnimationTarget.rotation
+                : bone.StartLocalRotation;
+
+            if (bone.HasPreviousAnimatedLocal)
+                bone.LastTargetMotion = Quaternion.Angle(
+                    bone.PreviousAnimatedLocal, animatedLocal);
+            bone.PreviousAnimatedLocal = animatedLocal;
+            bone.HasPreviousAnimatedLocal = true;
+
+            Quaternion currentLocal = Quaternion.Inverse(bone.Parent.rotation) *
+                bone.Body.rotation;
+            Quaternion error = animatedLocal * Quaternion.Inverse(currentLocal);
+            error.ToAngleAxis(out float angle, out _);
+            if (angle > 180f) angle -= 360f;
+            bone.LastAngle = Mathf.Abs(angle);
+
+            ApplyAnimationDrive(bone, animatedLocal,
+                hasFutureTarget ? replayStrength : 0f);
         }
 
         private void ApplyAnimationDrive(Bone bone,
@@ -551,13 +574,13 @@ namespace RagdollKinetics.Patches
         private void ConfigureJointLimits(Bone bone)
         {
             float range = _profile.JointLimitRange.Value;
-            bone.Joint.lowAngularXLimit = ScaleLimit(
+            bone.Joint.lowAngularXLimit = CreateScaledLimit(
                 bone.AuthoredLowX, range, true);
-            bone.Joint.highAngularXLimit = ScaleLimit(
+            bone.Joint.highAngularXLimit = CreateScaledLimit(
                 bone.AuthoredHighX, range, false);
-            bone.Joint.angularYLimit = ScaleLimit(
+            bone.Joint.angularYLimit = CreateScaledLimit(
                 bone.AuthoredY, range, false);
-            bone.Joint.angularZLimit = ScaleLimit(
+            bone.Joint.angularZLimit = CreateScaledLimit(
                 bone.AuthoredZ, range, false);
 
             float spring = _profile.JointLimitStiffness.Value * 10f;
@@ -571,22 +594,23 @@ namespace RagdollKinetics.Patches
 
         private float GetWorldFollowStrength(float elapsed)
         {
-            return Curve(_profile.WorldFollowStrength.Value, 0f,
+            return EvaluateDecayCurve(_profile.WorldFollowStrength.Value, 0f,
                 _profile.WorldFollowDecay.Value, elapsed);
         }
 
         private float GetBoneReplayStrength(float elapsed)
         {
-            return Curve(_profile.BoneReplayStrength.Value, 0f,
+            return EvaluateDecayCurve(_profile.BoneReplayStrength.Value, 0f,
                 _profile.BoneReplayDecay.Value, elapsed);
         }
 
-        private static float Curve(float start, float end, float duration,
+        private static float EvaluateDecayCurve(float start, float end,
+            float duration,
             float elapsed)
         {
             float progress = Mathf.Clamp01(elapsed /
                 Mathf.Max(0.05f, duration));
-            return Mathf.Lerp(start, end, SmoothStep(progress));
+            return Mathf.Lerp(start, end, ApplySmoothStep(progress));
         }
 
         private void DecayInheritedMomentum(float elapsed)
@@ -594,7 +618,7 @@ namespace RagdollKinetics.Patches
             float duration = Mathf.Max(0.05f,
                 _profile.MomentumDecay.Value);
             float progress = Mathf.Clamp01(elapsed / duration);
-            float retained = 1f - SmoothStep(progress);
+            float retained = 1f - ApplySmoothStep(progress);
             _remainingInheritedMomentum = _initialInheritedMomentum * retained;
         }
 
@@ -603,8 +627,9 @@ namespace RagdollKinetics.Patches
             if (_futureAnimation == null) return;
             foreach (Rigidbody body in _bodies)
             {
-                if (body == null || !_futureAnimation.TryGetTarget(body.name,
-                    out Transform target) || target == null) continue;
+                if (body == null ||
+                    !_futureAnimation.TryGetAnimationTarget(body.name,
+                        out Transform target) || target == null) continue;
                 Vector3 offset = body.worldCenterOfMass - target.position;
                 _followers.Add(new BodyFollower
                 {
@@ -669,7 +694,7 @@ namespace RagdollKinetics.Patches
                     name + " at " + _deathPosition);
         }
 
-        private void ApplyBodyFollowing(float strength)
+        private void DriveBodiesTowardAnimation(float strength)
         {
             float driveScale = Mathf.Max(0f, strength / 100f);
             if (driveScale <= 0f) return;
@@ -709,7 +734,7 @@ namespace RagdollKinetics.Patches
             float progress = Mathf.Clamp01(_fatalPushAge /
                 Mathf.Max(0.05f, Settings.FatalPushDecay.Value));
             _fatalPushVelocity = _fatalPushInitialVelocity *
-                (1f - SmoothStep(progress));
+                (1f - ApplySmoothStep(progress));
             if (progress >= 1f) _fatalPushVelocity = Vector3.zero;
         }
 
@@ -755,10 +780,14 @@ namespace RagdollKinetics.Patches
             float swingScale = Mathf.Lerp(1f,
                 bone.Profile.SwingScale * extendedLimit, bend);
 
-            bone.PassiveLowX = ScaleLimit(bone.AuthoredLowX, twistScale, true);
-            bone.PassiveHighX = ScaleLimit(bone.AuthoredHighX, twistScale, false);
-            bone.PassiveY = ScaleLimit(bone.AuthoredY, swingScale, false);
-            bone.PassiveZ = ScaleLimit(bone.AuthoredZ, swingScale, false);
+            bone.PassiveLowX = CreateScaledLimit(
+                bone.AuthoredLowX, twistScale, true);
+            bone.PassiveHighX = CreateScaledLimit(
+                bone.AuthoredHighX, twistScale, false);
+            bone.PassiveY = CreateScaledLimit(
+                bone.AuthoredY, swingScale, false);
+            bone.PassiveZ = CreateScaledLimit(
+                bone.AuthoredZ, swingScale, false);
             bone.Body.angularDrag = Mathf.Lerp(bone.BaseAngularDrag,
                 Mathf.Max(bone.BaseAngularDrag, bone.Profile.AngularDrag), bend);
         }
@@ -816,35 +845,36 @@ namespace RagdollKinetics.Patches
             }
         }
 
-        private static JointProfile GetProfile(string boneName)
+        private static JointProfile GetJointProfile(string boneName)
         {
             string name = (boneName ?? string.Empty).ToLowerInvariant();
-            if (Has(name, "calf", "shin", "lowerleg"))
+            if (ContainsAnyFragment(name, "calf", "shin", "lowerleg"))
                 return new JointProfile(0.28f, 0.22f, 2.8f, 18f);
-            if (Has(name, "forearm", "lowerarm"))
+            if (ContainsAnyFragment(name, "forearm", "lowerarm"))
                 return new JointProfile(0.35f, 0.28f, 2.3f, 15f);
-            if (Has(name, "thigh", "upleg"))
+            if (ContainsAnyFragment(name, "thigh", "upleg"))
                 return new JointProfile(0.55f, 0.58f, 2.2f, 14f);
-            if (Has(name, "upperarm", "shoulder"))
+            if (ContainsAnyFragment(name, "upperarm", "shoulder"))
                 return new JointProfile(0.58f, 0.62f, 1.8f, 12f);
-            if (Has(name, "hand", "wrist"))
+            if (ContainsAnyFragment(name, "hand", "wrist"))
                 return new JointProfile(0.38f, 0.35f, 1.7f, 10f);
-            if (Has(name, "foot", "ankle"))
+            if (ContainsAnyFragment(name, "foot", "ankle"))
                 return new JointProfile(0.32f, 0.28f, 2.0f, 13f);
-            if (Has(name, "head", "neck"))
+            if (ContainsAnyFragment(name, "head", "neck"))
                 return new JointProfile(0.42f, 0.45f, 1.6f, 11f);
-            if (Has(name, "spine", "chest", "rib", "pelvis"))
+            if (ContainsAnyFragment(name, "spine", "chest", "rib", "pelvis"))
                 return new JointProfile(0.38f, 0.42f, 3.0f, 20f);
             return new JointProfile(0.50f, 0.50f, 2.0f, 12f);
         }
 
-        private static SoftJointLimit CopyLimit(SoftJointLimit source)
+        private static SoftJointLimit CreateNonBouncingLimit(
+            SoftJointLimit source)
         {
             source.bounciness = 0f;
             return source;
         }
 
-        private static SoftJointLimit ScaleLimit(SoftJointLimit source,
+        private static SoftJointLimit CreateScaledLimit(SoftJointLimit source,
             float scale, bool negative)
         {
             source.limit = negative
@@ -854,7 +884,7 @@ namespace RagdollKinetics.Patches
             return source;
         }
 
-        private static float SmoothStep(float value)
+        private static float ApplySmoothStep(float value)
         {
             return value * value * (3f - 2f * value);
         }
@@ -866,7 +896,8 @@ namespace RagdollKinetics.Patches
                 !float.IsNaN(value.z) && !float.IsInfinity(value.z);
         }
 
-        private static bool Has(string value, params string[] fragments)
+        private static bool ContainsAnyFragment(string value,
+            params string[] fragments)
         {
             for (int i = 0; i < fragments.Length; i++)
                 if (value.Contains(fragments[i])) return true;

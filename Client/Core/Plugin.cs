@@ -1,6 +1,7 @@
 using BepInEx;
 using BepInEx.Logging;
-using HarmonyLib;
+using RagdollKinetics.Patches;
+using SPT.Reflection.Patching;
 
 namespace RagdollKinetics
 {
@@ -17,7 +18,9 @@ namespace RagdollKinetics
         {
             Log = Logger;
             Settings.Bind(Config);
-            new Harmony(Guid).PatchAll(typeof(Plugin).Assembly);
+            PatchManager patchManager = new PatchManager(this);
+            patchManager.AddPatches(RagdollPatches.CreateAll());
+            patchManager.EnablePatches();
             gameObject.AddComponent<RagdollPreviewController>();
             gameObject.AddComponent<NativeDeathDiagnostics>();
             Logger.LogInfo(Name + " " + Version + " loaded");

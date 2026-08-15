@@ -19,6 +19,7 @@
     <Reference Include="Comfort"><HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\Comfort.dll</HintPath></Reference>
     <Reference Include="Newtonsoft.Json"><HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\Newtonsoft.Json.dll</HintPath></Reference>
     <Reference Include="spt-common"><HintPath>$(SptRoot)\BepInEx\plugins\spt\spt-common.dll</HintPath></Reference>
+    <Reference Include="spt-reflection"><HintPath>$(SptRoot)\BepInEx\plugins\spt\spt-reflection.dll</HintPath></Reference>
     <Reference Include="UnityEngine"><HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\UnityEngine.dll</HintPath></Reference>
     <Reference Include="UnityEngine.AnimationModule"><HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\UnityEngine.AnimationModule.dll</HintPath></Reference>
     <Reference Include="UnityEngine.AIModule"><HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\UnityEngine.AIModule.dll</HintPath></Reference>

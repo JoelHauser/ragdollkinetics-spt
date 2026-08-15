@@ -1,8 +1,8 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BepInEx.Configuration;
@@ -12,6 +12,7 @@ using EFT.AssetsManager;
 using EFT.Game.Spawning;
 using EFT.Interactive;
 using HarmonyLib;
+using SPT.Reflection.Patching;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using SPT.Common.Http;
@@ -822,7 +823,6 @@ namespace RagdollKinetics
         }
     }
 
-    [HarmonyPatch]
     internal static class RagdollPreviewBotPatches
     {
         private static readonly HashSet<BotOwner> PreviewBots =
@@ -843,20 +843,29 @@ namespace RagdollKinetics
             return bot != null && PreviewBots.Contains(bot);
         }
 
-        [HarmonyPatch(typeof(BotOwner), nameof(BotOwner.UpdateManual))]
-        [HarmonyPrefix]
-        private static bool UpdateOnlyLocomotion(BotOwner __instance)
+        internal static bool ShouldRunUpdate(BotOwner bot)
         {
-            if (__instance == null || !PreviewBots.Contains(__instance)) return true;
-            return false;
+            return bot == null || !PreviewBots.Contains(bot);
         }
+    }
 
-        [HarmonyPatch(typeof(BotOwner), nameof(BotOwner.FixedUpdate))]
-        [HarmonyPrefix]
-        private static bool FixedUpdateOnlyLocomotion(BotOwner __instance)
-        {
-            if (__instance == null || !PreviewBots.Contains(__instance)) return true;
-            return false;
-        }
+    internal sealed class PreviewBotManualUpdatePatch : ModulePatch
+    {
+        protected override MethodBase GetTargetMethod() =>
+            AccessTools.Method(typeof(BotOwner), nameof(BotOwner.UpdateManual));
+
+        [PatchPrefix]
+        private static bool PatchPrefix(BotOwner __instance) =>
+            RagdollPreviewBotPatches.ShouldRunUpdate(__instance);
+    }
+
+    internal sealed class PreviewBotFixedUpdatePatch : ModulePatch
+    {
+        protected override MethodBase GetTargetMethod() =>
+            AccessTools.Method(typeof(BotOwner), nameof(BotOwner.FixedUpdate));
+
+        [PatchPrefix]
+        private static bool PatchPrefix(BotOwner __instance) =>
+            RagdollPreviewBotPatches.ShouldRunUpdate(__instance);
     }
 }

@@ -26,7 +26,7 @@ namespace RagdollKinetics.Patches
             }
         }
 
-        private readonly Dictionary<string, Transform> _targets =
+        private readonly Dictionary<string, Transform> _animationTargetsByName =
             new Dictionary<string, Transform>(64);
         private readonly List<MotionSample> _motionSamples =
             new List<MotionSample>(20);
@@ -63,13 +63,10 @@ namespace RagdollKinetics.Patches
         internal Settings.DeathProfile Profile =>
             Settings.GetDeathProfile(_deathMotion);
 
-        internal void SampleLivingMotion()
+        internal void CaptureLivingMotion()
         {
             if (_sourceRoot == null || _running) return;
-            if (_player != null)
-            {
-                _lastPoseLevel = _player.PoseLevel;
-            }
+            if (_player != null) _lastPoseLevel = _player.PoseLevel;
             float now = Time.time;
             Vector3 position = _sourceRoot.position;
             if (_motionSamples.Count > 0)
@@ -89,7 +86,7 @@ namespace RagdollKinetics.Patches
                 _motionSamples.RemoveAt(0);
         }
 
-        internal void Prepare(Player player)
+        internal void PrepareAnimationDriver(Player player)
         {
             if (_ready)
             {
@@ -146,8 +143,8 @@ namespace RagdollKinetics.Patches
             root.SetPositionAndRotation(_sourceRoot.position,
                 _sourceRoot.rotation);
             root.localScale = _sourceRoot.lossyScale;
-            _targets[_sourceRoot.name] = root;
-            CloneChildren(_sourceRoot, root);
+            _animationTargetsByName[_sourceRoot.name] = root;
+            CloneTransformHierarchy(_sourceRoot, root);
 
             _driverUnity = _driverRoot.AddComponent<Animator>();
             Animator avatarSource = _fastMode
@@ -167,7 +164,8 @@ namespace RagdollKinetics.Patches
                 _ready = true;
                 if (Settings.DebugLogging.Value)
                     Plugin.Log.LogInfo("[FutureAnimation] Prepared " + name +
-                        " source=UnityAnimator targets=" + _targets.Count +
+                        " source=UnityAnimator targets=" +
+                        _animationTargetsByName.Count +
                         " layers=" + _driverUnity.layerCount);
                 return;
             }
@@ -208,10 +206,11 @@ namespace RagdollKinetics.Patches
             if (Settings.DebugLogging.Value)
                 Plugin.Log.LogInfo("[FutureAnimation] Prepared " + name +
                     " source=" + _source.GetType().Name + " targets=" +
-                    _targets.Count + " layers=" + _driver.layerCount);
+                    _animationTargetsByName.Count +
+                    " layers=" + _driver.layerCount);
         }
 
-        internal void CaptureAndRun()
+        internal void CaptureDeathAnimation()
         {
             if (!_ready) return;
             CaptureWorldAnchor();
@@ -221,39 +220,10 @@ namespace RagdollKinetics.Patches
                 return;
             }
             if (_source == null) return;
-            CopyParameters();
+            CopyAnimatorParameters();
             int count = Math.Min(_source.layerCount, _driver.layerCount);
             for (int layer = 0; layer < count; layer++)
-            {
-                _driver.SetLayerWeight(layer, _source.GetLayerWeight(layer));
-                AnimatorStateInfoWrapper state =
-                    _source.GetCurrentAnimatorStateInfo(layer);
-                float normalizedTime = state.loop
-                    ? Mathf.Repeat(state.normalizedTime, 1f)
-                    : Mathf.Clamp01(state.normalizedTime);
-                FastLayerInfo destination =
-                    _driver.FastControllerInfo.GetStateInfo(layer);
-                if (_driver.GetParametersCache() is
-                    FastAnimatorProcessor.FastAnimatorCache cache &&
-                    cache.GetState(state.fullPathHash, out AbstractState mapped) &&
-                    mapped is AbstractAnimatorControllerState controllerState)
-                {
-                    destination.CurrentState = controllerState;
-                    destination.CurrentStateAbsoluteTime =
-                        controllerState.MotionDuration * normalizedTime;
-                    destination.Transition = null;
-                    destination.TransitionAbsTime = 0f;
-                    destination.DestinationStateAbsoluteTime = 0f;
-                    PlayableLayerProcessor processor = _playable
-                        .GetLayerProcessor(layer) as PlayableLayerProcessor;
-                    if (processor != null)
-                    {
-                        processor._clipBlender._currentStateNormalizedTime =
-                            normalizedTime;
-                        processor._clipBlender._nextStateNormalizedTime = 0d;
-                    }
-                }
-            }
+                CopyAnimatorLayerState(layer);
             _simulationElapsed = 0f;
             _captureFrame = Time.frameCount;
             _discardFirstPostCaptureUpdate = true;
@@ -264,14 +234,17 @@ namespace RagdollKinetics.Patches
             CaptureMotionRootReference();
             if (Settings.DebugLogging.Value)
                 Plugin.Log.LogInfo("[FutureAnimation] Captured and running " +
-                    name + " layers=" + count + " targets=" + _targets.Count);
+                    name + " layers=" + count + " targets=" +
+                    _animationTargetsByName.Count);
         }
 
-        internal bool TryGetTarget(string boneName, out Transform target)
+        internal bool TryGetAnimationTarget(string boneName,
+            out Transform target)
         {
             target = null;
             return Running && boneName != null &&
-                _targets.TryGetValue(boneName, out target) && target != null;
+                _animationTargetsByName.TryGetValue(boneName, out target) &&
+                target != null;
         }
 
         private void LateUpdate()
@@ -331,53 +304,79 @@ namespace RagdollKinetics.Patches
             ApplyWorldAnchor(_simulationElapsed);
         }
 
-        private void CopyParameters()
+        private void CopyAnimatorParameters()
         {
             int count = Math.Min(_source.parameterCount, _driver.parameterCount);
             for (int i = 0; i < count; i++)
+                CopyParameter(_source.GetParameter(i));
+        }
+
+        private void CopyParameter(AnimatorParameterInfo parameter)
+        {
+            switch (parameter.type)
             {
-                AnimatorParameterInfo parameter = _source.GetParameter(i);
-                switch (parameter.type)
-                {
-                    case AnimatorControllerParameterType.Float:
-                        _driver.SetFloat(parameter.nameHash,
-                            _source.GetFloat(parameter.nameHash));
-                        break;
-                    case AnimatorControllerParameterType.Int:
-                        _driver.SetInteger(parameter.nameHash,
-                            _source.GetInteger(parameter.nameHash));
-                        break;
-                    case AnimatorControllerParameterType.Bool:
-                    case AnimatorControllerParameterType.Trigger:
-                        _driver.SetBool(parameter.nameHash,
-                            _source.GetBool(parameter.nameHash));
-                        break;
-                }
+                case AnimatorControllerParameterType.Float:
+                    _driver.SetFloat(parameter.nameHash,
+                        _source.GetFloat(parameter.nameHash));
+                    break;
+                case AnimatorControllerParameterType.Int:
+                    _driver.SetInteger(parameter.nameHash,
+                        _source.GetInteger(parameter.nameHash));
+                    break;
+                case AnimatorControllerParameterType.Bool:
+                case AnimatorControllerParameterType.Trigger:
+                    _driver.SetBool(parameter.nameHash,
+                        _source.GetBool(parameter.nameHash));
+                    break;
             }
+        }
+
+        private void CopyAnimatorLayerState(int layer)
+        {
+            _driver.SetLayerWeight(layer, _source.GetLayerWeight(layer));
+            AnimatorStateInfoWrapper state =
+                _source.GetCurrentAnimatorStateInfo(layer);
+            float normalizedTime = state.loop
+                ? Mathf.Repeat(state.normalizedTime, 1f)
+                : Mathf.Clamp01(state.normalizedTime);
+
+            if (!TryGetControllerState(state.fullPathHash,
+                out AbstractAnimatorControllerState controllerState)) return;
+
+            FastLayerInfo destination =
+                _driver.FastControllerInfo.GetStateInfo(layer);
+            destination.CurrentState = controllerState;
+            destination.CurrentStateAbsoluteTime =
+                controllerState.MotionDuration * normalizedTime;
+            destination.Transition = null;
+            destination.TransitionAbsTime = 0f;
+            destination.DestinationStateAbsoluteTime = 0f;
+
+            PlayableLayerProcessor processor = _playable
+                .GetLayerProcessor(layer) as PlayableLayerProcessor;
+            if (processor == null) return;
+
+            processor._clipBlender._currentStateNormalizedTime = normalizedTime;
+            processor._clipBlender._nextStateNormalizedTime = 0d;
+        }
+
+        private bool TryGetControllerState(int stateHash,
+            out AbstractAnimatorControllerState controllerState)
+        {
+            controllerState = null;
+            if (!(_driver.GetParametersCache() is
+                FastAnimatorProcessor.FastAnimatorCache cache)) return false;
+            if (!cache.GetState(stateHash, out AbstractState state)) return false;
+
+            controllerState = state as AbstractAnimatorControllerState;
+            return controllerState != null;
         }
 
         private void CaptureUnityAnimator()
         {
             foreach (AnimatorControllerParameter parameter in
                 _sourceUnity.parameters)
-            {
-                switch (parameter.type)
-                {
-                    case AnimatorControllerParameterType.Float:
-                        _driverUnity.SetFloat(parameter.nameHash,
-                            _sourceUnity.GetFloat(parameter.nameHash));
-                        break;
-                    case AnimatorControllerParameterType.Int:
-                        _driverUnity.SetInteger(parameter.nameHash,
-                            _sourceUnity.GetInteger(parameter.nameHash));
-                        break;
-                    case AnimatorControllerParameterType.Bool:
-                    case AnimatorControllerParameterType.Trigger:
-                        _driverUnity.SetBool(parameter.nameHash,
-                            _sourceUnity.GetBool(parameter.nameHash));
-                        break;
-                }
-            }
+                CopyParameter(parameter);
             int count = Math.Min(_sourceUnity.layerCount,
                 _driverUnity.layerCount);
             for (int layer = 0; layer < count; layer++)
@@ -403,7 +402,7 @@ namespace RagdollKinetics.Patches
             if (Settings.DebugLogging.Value)
                 Plugin.Log.LogInfo("[FutureAnimation] Captured and running " +
                     name + " mode=UnityAnimator layers=" + count +
-                    " targets=" + _targets.Count);
+                    " targets=" + _animationTargetsByName.Count);
         }
 
         private void CaptureWorldAnchor()
@@ -416,15 +415,7 @@ namespace RagdollKinetics.Patches
                 ? _sourceMotionRoot.position : _deathRootPosition;
             _deathVelocity = EstimateCachedVelocity();
             _deathVelocity = Vector3.ClampMagnitude(_deathVelocity, 10f);
-            float speed = new Vector2(_deathVelocity.x,
-                _deathVelocity.z).magnitude;
-            _deathMotion = _lastPoseLevel < 0.65f
-                ? Settings.DeathMotion.Crouching
-                : speed < 0.35f
-                    ? Settings.DeathMotion.Standing
-                    : speed < 2.5f
-                        ? Settings.DeathMotion.Walking
-                        : Settings.DeathMotion.Running;
+            _deathMotion = ClassifyDeathMotion(_deathVelocity, _lastPoseLevel);
             if (_driverRoot != null)
                 _driverRoot.transform.SetPositionAndRotation(
                     _deathRootPosition, _deathRootRotation);
@@ -433,6 +424,37 @@ namespace RagdollKinetics.Patches
                     "[FutureAnimation] Death anchor {0} position={1} rotationY={2:0.0} cachedVelocity={3} pose={4:0.00} profile={5}",
                     name, _deathRootPosition, _deathRootRotation.eulerAngles.y,
                     _deathVelocity, _lastPoseLevel, _deathMotion));
+        }
+
+        private void CopyParameter(AnimatorControllerParameter parameter)
+        {
+            switch (parameter.type)
+            {
+                case AnimatorControllerParameterType.Float:
+                    _driverUnity.SetFloat(parameter.nameHash,
+                        _sourceUnity.GetFloat(parameter.nameHash));
+                    break;
+                case AnimatorControllerParameterType.Int:
+                    _driverUnity.SetInteger(parameter.nameHash,
+                        _sourceUnity.GetInteger(parameter.nameHash));
+                    break;
+                case AnimatorControllerParameterType.Bool:
+                case AnimatorControllerParameterType.Trigger:
+                    _driverUnity.SetBool(parameter.nameHash,
+                        _sourceUnity.GetBool(parameter.nameHash));
+                    break;
+            }
+        }
+
+        private static Settings.DeathMotion ClassifyDeathMotion(
+            Vector3 velocity, float poseLevel)
+        {
+            if (poseLevel < 0.65f) return Settings.DeathMotion.Crouching;
+
+            float speed = new Vector2(velocity.x, velocity.z).magnitude;
+            if (speed < 0.35f) return Settings.DeathMotion.Standing;
+            if (speed < 2.5f) return Settings.DeathMotion.Walking;
+            return Settings.DeathMotion.Running;
         }
 
         private Vector3 EstimateCachedVelocity()
@@ -502,8 +524,8 @@ namespace RagdollKinetics.Patches
         private void CaptureMotionRootReference()
         {
             _motionRoot = null;
-            if (!_targets.TryGetValue("Base HumanPelvis", out _motionRoot) ||
-                _motionRoot == null)
+            if (!_animationTargetsByName.TryGetValue(
+                "Base HumanPelvis", out _motionRoot) || _motionRoot == null)
             {
                 _hasMotionRootReference = false;
                 return;
@@ -516,7 +538,8 @@ namespace RagdollKinetics.Patches
         private void AlignMotionRootAtDeath()
         {
             if (_driverRoot == null ||
-                !_targets.TryGetValue("Base HumanPelvis", out _motionRoot) ||
+                !_animationTargetsByName.TryGetValue(
+                    "Base HumanPelvis", out _motionRoot) ||
                 _motionRoot == null) return;
             Vector3 correction = _sourceMotionRootDeathPosition -
                 _motionRoot.position;
@@ -562,22 +585,32 @@ namespace RagdollKinetics.Patches
                 ": " + reason);
         }
 
-        private void CloneChildren(Transform source, Transform parent)
+        private void CloneTransformHierarchy(Transform source,
+            Transform parent)
         {
             for (int i = 0; i < source.childCount; i++)
             {
                 Transform child = source.GetChild(i);
-                GameObject clone = new GameObject(child.name);
-                clone.hideFlags = HideFlags.HideAndDontSave;
-                Transform transform = clone.transform;
-                transform.SetParent(parent, false);
-                transform.localPosition = child.localPosition;
-                transform.localRotation = child.localRotation;
-                transform.localScale = child.localScale;
-                if (!_targets.ContainsKey(child.name))
-                    _targets.Add(child.name, transform);
-                CloneChildren(child, transform);
+                Transform clone = CloneTransform(child, parent);
+                if (!_animationTargetsByName.ContainsKey(child.name))
+                    _animationTargetsByName.Add(child.name, clone);
+                CloneTransformHierarchy(child, clone);
             }
+        }
+
+        private static Transform CloneTransform(Transform source,
+            Transform parent)
+        {
+            GameObject clone = new GameObject(source.name)
+            {
+                hideFlags = HideFlags.HideAndDontSave
+            };
+            Transform transform = clone.transform;
+            transform.SetParent(parent, false);
+            transform.localPosition = source.localPosition;
+            transform.localRotation = source.localRotation;
+            transform.localScale = source.localScale;
+            return transform;
         }
 
         private void OnDestroy()
@@ -594,7 +627,7 @@ namespace RagdollKinetics.Patches
                 Destroy(_driverRoot);
                 _driverRoot = null;
             }
-            _targets.Clear();
+            _animationTargetsByName.Clear();
             _motionSamples.Clear();
             _motionRoot = null;
             _sourceMotionRoot = null;

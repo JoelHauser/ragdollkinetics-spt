@@ -1,14 +1,18 @@
+using System.Reflection;
 using EFT;
 using EFT.Ballistics;
 using HarmonyLib;
+using SPT.Reflection.Patching;
 
 namespace RagdollKinetics.Patches
 {
-    [HarmonyPatch(typeof(BotAimingData), nameof(BotAimingData.GetHit))]
-    internal static class AiHitAimStabilityPatch
+    internal sealed class AiHitAimStabilityPatch : ModulePatch
     {
-        [HarmonyPrefix]
-        private static bool Prefix(BotAimingData __instance,
+        protected override MethodBase GetTargetMethod() =>
+            AccessTools.Method(typeof(BotAimingData), nameof(BotAimingData.GetHit));
+
+        [PatchPrefix]
+        private static bool PatchPrefix(BotAimingData __instance,
             DamageInfo damageInfo)
         {
             if (!Settings.StabilizeAiAimWhenHit.Value ||

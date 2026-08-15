@@ -1,17 +1,44 @@
+using System.Collections.Generic;
+using System.Reflection;
 using EFT;
 using EFT.AssetsManager;
 using EFT.Interactive;
 using HarmonyLib;
+using SPT.Reflection.Patching;
 using UnityEngine;
 
 namespace RagdollKinetics.Patches
 {
-    [HarmonyPatch]
     internal static class RagdollPatches
     {
-        [HarmonyPatch(typeof(Player), nameof(Player.BodyUpdate))]
-        [HarmonyPostfix]
-        private static void SampleAnimatedPose(Player __instance, float deltaTime)
+        internal static List<ModulePatch> CreateAll() =>
+            new List<ModulePatch>
+            {
+                new CaptureAnimatedPosePatch(),
+                new CaptureDeathAnimationPatch(),
+                new AttachRagdollControllerPatch(),
+                new SuppressDropSoundPatch(),
+                new ScaleFatalImpulsePatch(),
+                new KeepRagdollReactivePatch(),
+                new DelayRagdollFreezePatch(),
+                new AiHitAimStabilityPatch(),
+                new PreviewBotManualUpdatePatch(),
+                new PreviewBotFixedUpdatePatch()
+            };
+
+        private abstract class RagdollPatch : ModulePatch
+        {
+            protected static MethodBase Target<T>(string methodName) =>
+                AccessTools.Method(typeof(T), methodName);
+        }
+
+        private sealed class CaptureAnimatedPosePatch : RagdollPatch
+        {
+            protected override MethodBase GetTargetMethod() =>
+                Target<Player>(nameof(Player.BodyUpdate));
+
+            [PatchPostfix]
+            private static void PatchPostfix(Player __instance, float deltaTime)
         {
             if (!Settings.Enabled.Value || __instance == null ||
                 !__instance.IsAI ||
@@ -25,7 +52,7 @@ namespace RagdollKinetics.Patches
                 if (future == null)
                     future = __instance.gameObject
                         .AddComponent<FutureAnimationDriver>();
-                try { future.Prepare(__instance); }
+                try { future.PrepareAnimationDriver(__instance); }
                 catch (System.Exception exception)
                 {
                     Plugin.Log.LogError("[FutureAnimation] Prepare failed: " +
@@ -33,13 +60,19 @@ namespace RagdollKinetics.Patches
                     Object.Destroy(future);
                     future = null;
                 }
-                if (future != null) future.SampleLivingMotion();
+                if (future != null) future.CaptureLivingMotion();
             }
         }
 
-        [HarmonyPatch(typeof(Player), nameof(Player.OnDead))]
-        [HarmonyPrefix]
-        private static void FreezeAnimatedPose(Player __instance)
+        }
+
+        private sealed class CaptureDeathAnimationPatch : RagdollPatch
+        {
+            protected override MethodBase GetTargetMethod() =>
+                Target<Player>(nameof(Player.OnDead));
+
+            [PatchPrefix]
+            private static void PatchPrefix(Player __instance)
         {
             NativeDeathDiagnostics.ObserveDeath(__instance);
             if (!Settings.Enabled.Value || __instance == null ||
@@ -49,7 +82,7 @@ namespace RagdollKinetics.Patches
                 try
                 {
                     __instance.GetComponent<FutureAnimationDriver>()
-                        ?.CaptureAndRun();
+                        ?.CaptureDeathAnimation();
                 }
                 catch (System.Exception exception)
                 {
@@ -59,9 +92,15 @@ namespace RagdollKinetics.Patches
             }
         }
 
-        [HarmonyPatch(typeof(Corpse), nameof(Corpse.TryToCreateRagdoll))]
-        [HarmonyPostfix]
-        private static void AttachController(Corpse __instance)
+        }
+
+        private sealed class AttachRagdollControllerPatch : RagdollPatch
+        {
+            protected override MethodBase GetTargetMethod() =>
+                Target<Corpse>(nameof(Corpse.TryToCreateRagdoll));
+
+            [PatchPostfix]
+            private static void PatchPostfix(Corpse __instance)
         {
             if (!Settings.Enabled.Value || __instance == null ||
                 __instance.Ragdoll == null ||
@@ -73,7 +112,7 @@ namespace RagdollKinetics.Patches
                 __instance.gameObject.AddComponent<RagdollSkeleton>();
             try
             {
-                controller.Initialize(__instance.Ragdoll, future);
+                controller.InitializeRagdoll(__instance.Ragdoll, future);
             }
             catch (System.Exception exception)
             {
@@ -82,9 +121,15 @@ namespace RagdollKinetics.Patches
             }
         }
 
-        [HarmonyPatch(typeof(Corpse), nameof(Corpse.PlayCorpseDropSound))]
-        [HarmonyPrefix]
-        private static bool SuppressDropSoundDuringAnimation(Corpse __instance)
+        }
+
+        private sealed class SuppressDropSoundPatch : RagdollPatch
+        {
+            protected override MethodBase GetTargetMethod() =>
+                Target<Corpse>(nameof(Corpse.PlayCorpseDropSound));
+
+            [PatchPrefix]
+            private static bool PatchPrefix(Corpse __instance)
         {
             if (!Settings.Enabled.Value ||
                 !Settings.FutureAnimationDriver.Value || __instance == null)
@@ -94,11 +139,20 @@ namespace RagdollKinetics.Patches
             return driver == null || !driver.Running;
         }
 
-        [HarmonyPatch(typeof(CorpseRagdoll), nameof(CorpseRagdoll.ApplyImpulse),
-            new System.Type[] { typeof(Rigidbody), typeof(Vector3), typeof(Vector3),
-                typeof(float) })]
-        [HarmonyPrefix]
-        private static bool ScaleFatalImpulse(CorpseRagdoll __instance,
+        }
+
+        private sealed class ScaleFatalImpulsePatch : RagdollPatch
+        {
+            protected override MethodBase GetTargetMethod() =>
+                AccessTools.Method(typeof(CorpseRagdoll),
+                    nameof(CorpseRagdoll.ApplyImpulse), new[]
+                    {
+                        typeof(Rigidbody), typeof(Vector3), typeof(Vector3),
+                        typeof(float)
+                    });
+
+            [PatchPrefix]
+            private static bool PatchPrefix(CorpseRagdoll __instance,
             Rigidbody rigidbody, Vector3 direction, Vector3 point,
             ref float thrust)
         {
@@ -116,10 +170,16 @@ namespace RagdollKinetics.Patches
             return true;
         }
 
-        [HarmonyPatch(typeof(PlayerRigidbodySleepHierarchy),
-            nameof(PlayerRigidbodySleepHierarchy.TryPutToSleep))]
-        [HarmonyPrefix]
-        private static bool KeepRagdollReactive(
+        }
+
+        private sealed class KeepRagdollReactivePatch : RagdollPatch
+        {
+            protected override MethodBase GetTargetMethod() =>
+                Target<PlayerRigidbodySleepHierarchy>(
+                    nameof(PlayerRigidbodySleepHierarchy.TryPutToSleep));
+
+            [PatchPrefix]
+            private static bool PatchPrefix(
             PlayerRigidbodySleepHierarchy __instance, ref bool __result)
         {
             if (!Settings.Enabled.Value) return true;
@@ -133,15 +193,22 @@ namespace RagdollKinetics.Patches
             return false;
         }
 
-        [HarmonyPatch(typeof(Corpse), nameof(Corpse.CheckCorpseIsStill))]
-        [HarmonyPostfix]
-        private static void DelayRagdollFreeze(Corpse __instance,
+        }
+
+        private sealed class DelayRagdollFreezePatch : RagdollPatch
+        {
+            protected override MethodBase GetTargetMethod() =>
+                Target<Corpse>(nameof(Corpse.CheckCorpseIsStill));
+
+            [PatchPostfix]
+            private static void PatchPostfix(Corpse __instance,
             ref bool __result)
         {
             if (!Settings.Enabled.Value || __instance == null) return;
             RagdollSkeleton skeleton =
                 __instance.GetComponent<RagdollSkeleton>();
             if (skeleton != null) __result = skeleton.AllowFreeze;
+        }
         }
     }
 }
