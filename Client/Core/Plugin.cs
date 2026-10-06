@@ -10,7 +10,7 @@ namespace RagdollKinetics
     {
         public const string Guid = "com.hysocs.ragdollkinetics";
         public const string Name = "Ragdoll Kinetics";
-        public const string Version = "1.2.1";
+        public const string Version = "1.3.0";
 
         internal static ManualLogSource Log { get; private set; }
 

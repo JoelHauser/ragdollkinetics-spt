@@ -36,6 +36,7 @@ namespace RagdollKinetics
 
         private const string Ragdolls = "Ragdolls";
         private const string Preview = "Ragdoll Preview (Debug)";
+        private const string Collapse = "Collapse";
 
         internal static ConfigEntry<bool> Enabled { get; private set; }
         internal static ConfigEntry<bool> FutureAnimationDriver { get; private set; }
@@ -51,6 +52,14 @@ namespace RagdollKinetics
         internal static ConfigEntry<bool> TeleportRagdollOnGlitch { get; private set; }
         internal static ConfigEntry<float> FreezeDelay { get; private set; }
         internal static ConfigEntry<bool> FreezeWhenSettled { get; private set; }
+        internal static ConfigEntry<float> LegToneLoss { get; private set; }
+        internal static ConfigEntry<float> ArmToneLoss { get; private set; }
+        internal static ConfigEntry<float> SpineToneLoss { get; private set; }
+        internal static ConfigEntry<float> HeadToneLoss { get; private set; }
+        internal static ConfigEntry<bool> HeadshotLightsOut { get; private set; }
+        internal static ConfigEntry<float> FallWithShot { get; private set; }
+        internal static ConfigEntry<bool> ScaleByBullet { get; private set; }
+        internal static ConfigEntry<float> ExplosionPush { get; private set; }
         internal static ConfigEntry<bool> PerformanceLogging { get; private set; }
         internal static ConfigEntry<bool> PreviewEnabled { get; private set; }
         internal static ConfigEntry<PreviewMotion> PreviewMode { get; private set; }
@@ -106,6 +115,38 @@ namespace RagdollKinetics
             Round(ImpulseScale);
             Round(FatalPushDecay);
             Round(RagdollMassScale);
+
+            LegToneLoss = Range(config, Collapse, "LegToneLoss", 0.15f,
+                "Seconds for the legs to lose muscle tone after death. Short values buckle the knees at once instead of leaving the body standing.",
+                0.02f, 4f, "Legs Give Way", 500);
+            ArmToneLoss = Range(config, Collapse, "ArmToneLoss", 0.3f,
+                "Seconds for the arms to lose muscle tone after death.",
+                0.02f, 4f, "Arms Go Limp", 490);
+            SpineToneLoss = Range(config, Collapse, "SpineToneLoss", 0.5f,
+                "Seconds for the spine and pelvis to lose muscle tone after death. A little longer than the legs makes the body fold rather than flop.",
+                0.02f, 4f, "Spine Gives Way", 480);
+            HeadToneLoss = Range(config, Collapse, "HeadToneLoss", 0.4f,
+                "Seconds for the head and neck to lose muscle tone after death.",
+                0.02f, 4f, "Head Drops", 470);
+            HeadshotLightsOut = Toggle(config, Collapse,
+                "HeadshotLightsOut", true,
+                "A killing shot to the head or neck makes every region go limp four times faster.",
+                "Headshot Lights Out", 460);
+            FallWithShot = Range(config, Collapse, "FallWithShot", 1.2f,
+                "Sideways speed in m/s given to the upper body along the killing bullet's line, so the body tips away from the shot instead of dropping straight down into a heap. Head and neck hits push 1.5 times harder; a leg hit kicks that leg out instead. Moving bots still fall mostly with their own momentum.",
+                0f, 4f, "Fall With The Shot", 450);
+            ScaleByBullet = Toggle(config, Collapse, "ScaleByBullet", true,
+                "Scale the death push by the killing round's energy at impact (bullet mass and speed; every caliber, modded ones included), with high-penetration rounds that pass straight through giving up to a quarter less. Heavy rounds also make the body go limp faster and kick a struck leg out harder. Roughly: 9x18 x0.5, 9x19 x0.7, 5.45x39 PS x0.95, 7.62x39 PS x1.2, 12-gauge buckshot (close) x1.3, 7.62x51 M80 x1.5, slug x1.5, .338 Lapua x2-3, .50 BMG and 12.7x108 x2.6. Off pushes every round the same.",
+                "Bullet Type Matters", 440);
+            ExplosionPush = Range(config, Collapse, "ExplosionPush", 3.5f,
+                "Push in m/s from a strength-100 grenade at point-blank range, falling off with the square of the distance to nothing at its blast radius; limbs take more than the torso, unevenly, so bodies fold rather than fly. At the default an F-1 knocks a body back about 0.8 m at 1 m, 0.3 m at 2 m and barely at 4 m. Applies to bots killed by the blast and to fresh corpses that are still moving; settled, frozen corpses do not react.",
+                0f, 10f, "Explosion Push", 430);
+            Round(FallWithShot);
+            Round(ExplosionPush);
+            Round(LegToneLoss);
+            Round(ArmToneLoss);
+            Round(SpineToneLoss);
+            Round(HeadToneLoss);
 
             StabilizeAiAimWhenHit = config.Bind("AI Hit Response", "StabilizeAimWhenHit", true, "Prevent random aim-direction flicks when an AI is hit by its already visible target.");
 
@@ -167,7 +208,7 @@ namespace RagdollKinetics
                 0.05f, 8f, "Momentum Decay", 550);
             profile.WorldFollowStrength = Range(config, section,
                 "WorldFollowStrength", worldStrength,
-                "Strength pulling each rigidbody toward its animated world position.",
+                "Strength carrying each rigidbody along its animated path. Horizontal only; gravity always acts, so the body falls while its momentum carries it.",
                 0f, 200f, "World Follow Strength", 600);
             profile.WorldFollowDecay = Range(config, section,
                 "WorldFollowDecay", worldDecay,
@@ -179,7 +220,7 @@ namespace RagdollKinetics
                 0f, 200f, "Bone Replay Strength", 580);
             profile.BoneReplayDecay = Range(config, section,
                 "BoneReplayDecay", replayDecay,
-                "Seconds for relative bone animation replay to decay to zero.",
+                "Longest time any joint keeps replaying the pose. Each body region also has its own, usually shorter, time under Collapse.",
                 0.05f, 8f, "Bone Replay Decay", 570);
             profile.BoneReplayMaximumTorque = Range(config, section,
                 "BoneReplayMaximumTorque", maximumTorque,

@@ -23,13 +23,151 @@ namespace RagdollKinetics.Patches
                 new DelayRagdollFreezePatch(),
                 new AiHitAimStabilityPatch(),
                 new PreviewBotManualUpdatePatch(),
-                new PreviewBotFixedUpdatePatch()
+                new PreviewBotFixedUpdatePatch(),
+                new RecordShotPatch(),
+                new RecordBlastPatch()
             };
 
         private abstract class RagdollPatch : ModulePatch
         {
             protected static MethodBase Target<T>(string methodName) =>
                 AccessTools.Method(typeof(T), methodName);
+
+            protected static System.Func<object, object> Getter(
+                System.Type type, string name)
+            {
+                FieldInfo field = AccessTools.Field(type, name);
+                if (field != null) return field.GetValue;
+                PropertyInfo property = AccessTools.Property(type, name);
+                if (property != null && property.CanRead)
+                    return instance => property.GetValue(instance, null);
+                Plugin.Log.LogWarning("[Impacts] " + type.Name + "." + name +
+                    " not found; bullet type will count for less.");
+                return null;
+            }
+        }
+
+        // Every bullet that hits a player passes through GameWorld.ShotDelegate with
+        // its mass and impact velocity; remember them on the player it hit.
+        private sealed class RecordShotPatch : RagdollPatch
+        {
+            private static System.Func<object, object> _hitCollider, _mass,
+                _velocity, _initialSpeed, _penetration, _fireIndex;
+            private static bool _failed;
+
+            protected override MethodBase GetTargetMethod()
+            {
+                MethodInfo method = AccessTools.Method(typeof(GameWorld),
+                    "ShotDelegate");
+                System.Type shot = method.GetParameters()[0].ParameterType;
+                _hitCollider = Getter(shot, "HitCollider");
+                _mass = Getter(shot, "BulletMassGram");
+                _velocity = Getter(shot, "CurrentVelocity");
+                _initialSpeed = Getter(shot, "InitialSpeed");
+                _penetration = Getter(shot, "PenetrationPower");
+                _fireIndex = Getter(shot, "FireIndex");
+                return method;
+            }
+
+            [PatchPrefix]
+            private static void PatchPrefix(object __0)
+            {
+                if (_failed || !Settings.Enabled.Value || __0 == null ||
+                    _hitCollider == null || _mass == null) return;
+                try
+                {
+                    Collider hit = _hitCollider(__0) as Collider;
+                    Player target = hit != null
+                        ? hit.GetComponentInParent<Player>() : null;
+                    if (target == null) return;
+                    float speed = _velocity != null
+                        ? ((Vector3)_velocity(__0)).magnitude : 0f;
+                    if (speed <= 0f && _initialSpeed != null)
+                        speed = (float)_initialSpeed(__0);
+                    float mass = (float)_mass(__0) / 1000f;
+                    Impacts.RecordShot(target, 0.5f * mass * speed * speed,
+                        _penetration != null ? (float)_penetration(__0) : 0f,
+                        _fireIndex != null ? (int)_fireIndex(__0) : 0);
+                }
+                catch (System.Exception exception)
+                {
+                    _failed = true;
+                    Plugin.Log.LogError("[Impacts] Recording shots failed; " +
+                        "every round now pushes the same: " + exception);
+                }
+            }
+        }
+
+        // Every explosion (thrown grenades, launcher rounds, mines) goes through one
+        // static Explosion(IExplosiveItem, Vector3, ...) on an obfuscated class.
+        private sealed class RecordBlastPatch : RagdollPatch
+        {
+            private static bool _failed;
+
+            protected override MethodBase GetTargetMethod()
+            {
+                MethodBase shared = FindSharedExplosion();
+                if (shared != null) return shared;
+                Plugin.Log.LogWarning("[Impacts] Shared explosion method not " +
+                    "found; only thrown grenades and launcher rounds will " +
+                    "push ragdolls.");
+                return AccessTools.Method(typeof(Grenade), "Explosion");
+            }
+
+            private static MethodBase FindSharedExplosion()
+            {
+                System.Type[] types;
+                try { types = typeof(IExplosiveItem).Assembly.GetTypes(); }
+                catch (ReflectionTypeLoadException exception)
+                {
+                    types = exception.Types;
+                }
+                foreach (System.Type type in types)
+                {
+                    if (type == null || !type.IsAbstract || !type.IsSealed)
+                        continue;
+                    foreach (MethodInfo method in type.GetMethods(
+                        BindingFlags.Public | BindingFlags.Static))
+                    {
+                        if (method.Name != "Explosion") continue;
+                        ParameterInfo[] parameters = method.GetParameters();
+                        if (parameters.Length >= 2 &&
+                            parameters[0].ParameterType == typeof(IExplosiveItem) &&
+                            parameters[1].ParameterType == typeof(Vector3))
+                            return method;
+                    }
+                }
+                return null;
+            }
+
+            [PatchPostfix]
+            private static void PatchPostfix(object[] __args)
+            {
+                if (_failed || !Settings.Enabled.Value || __args == null) return;
+                try
+                {
+                    IExplosiveItem item = null;
+                    for (int i = 0; i < __args.Length; i++)
+                    {
+                        if (item == null)
+                        {
+                            item = __args[i] as IExplosiveItem;
+                            continue;
+                        }
+                        if (!(__args[i] is Vector3 position)) continue;
+                        if (!item.IsDummy && item.MaxExplosionDistance > 0f)
+                            Impacts.RecordBlast(position,
+                                item.MaxExplosionDistance, item.GetStrength);
+                        return;
+                    }
+                }
+                catch (System.Exception exception)
+                {
+                    _failed = true;
+                    Plugin.Log.LogError("[Impacts] Recording explosions " +
+                        "failed; ragdolls will ignore them: " + exception);
+                }
+            }
         }
 
         private sealed class CaptureAnimatedPosePatch : RagdollPatch
@@ -182,10 +320,11 @@ namespace RagdollKinetics.Patches
             if (!Settings.Enabled.Value) return true;
             RagdollSkeleton skeleton = rigidbody != null
                 ? rigidbody.GetComponentInParent<RagdollSkeleton>() : null;
-            if (skeleton != null && skeleton.CaptureFatalImpulse(rigidbody,
-                direction, point, thrust))
-                return false;
-            thrust *= Settings.ImpulseScale.Value;
+            if (skeleton != null)
+                skeleton.CaptureFatalImpulse(rigidbody, direction, point,
+                    thrust);
+            thrust *= Settings.ImpulseScale.Value *
+                (skeleton != null ? skeleton.ShotEnergyFactor : 1f);
             return true;
         }
 

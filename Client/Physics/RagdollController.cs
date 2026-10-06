@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using BepInEx.Configuration;
 using EFT;
 using EFT.AssetsManager;
 using EFT.Interactive;
@@ -188,9 +189,18 @@ namespace RagdollKinetics.Patches
             }
         }
 
+        private enum BoneRegion
+        {
+            Leg,
+            Arm,
+            Spine,
+            Head
+        }
+
         private sealed class Bone
         {
             internal string Name;
+            internal BoneRegion Region;
             internal Rigidbody Body;
             internal Rigidbody Parent;
             internal CharacterJoint SourceJoint;
@@ -248,6 +258,22 @@ namespace RagdollKinetics.Patches
         private float _lastPelvisDebugTime;
         private Vector3 _deathPosition;
         private bool _hasDeathPosition;
+        private bool _headShot;
+        private bool _fallApplied;
+        private bool _blastKill;
+        private float _shotEnergyFactor = 1f;
+        private float _shotPenetrationFactor = 1f;
+        private int _lastBlastId;
+        private readonly List<Impacts.Blast> _blastBuffer =
+            new List<Impacts.Blast>(4);
+
+        private float _hitSeverity = 1f;
+        private readonly HashSet<Rigidbody> _limpBodies =
+            new HashSet<Rigidbody>();
+
+        // Scales EFT's own corpse impulse; capped so the heavy hitters' extra comes
+        // from the fall push and the leg kick, not from one body part flying off.
+        internal float ShotEnergyFactor => Mathf.Min(2f, _shotEnergyFactor);
         private readonly Dictionary<Rigidbody, Vector2Int> _solverDefaults =
             new Dictionary<Rigidbody, Vector2Int>(20);
         private float _activeSeconds;
@@ -309,6 +335,8 @@ namespace RagdollKinetics.Patches
                 GetBoneDepth(right)));
             InitializeBodyFollowers();
             ragdoll.WakeUp();
+            ReadKillingShot();
+            ApplyBlasts(true);
             if (_pelvisBody != null)
             {
                 _lastPelvisDebugPosition = _pelvisBody.position;
@@ -341,6 +369,7 @@ namespace RagdollKinetics.Patches
             Bone bone = new Bone
             {
                 Name = body.name,
+                Region = GetBoneRegion(body.name),
                 Body = body,
                 Parent = joint.connectedBody,
                 SourceJoint = source,
@@ -510,6 +539,9 @@ namespace RagdollKinetics.Patches
             if (Time.frameCount == _firstPhysicsFrame) return;
 
             RecoverGlitchedRagdoll();
+            // A blast in the corpse's first half-second is what killed it: blast
+            // damage lands inside the explosion call, before the blast is recorded.
+            ApplyBlasts(Time.time - _started < 0.5f);
             if (_released) return;
             long started = Perf.Enabled ? Perf.Start() : 0L;
 
@@ -518,15 +550,17 @@ namespace RagdollKinetics.Patches
             float elapsed = _physicsElapsed;
             DecayInheritedMomentum(elapsed);
             float worldFollowStrength = GetWorldFollowStrength(elapsed);
-            float boneReplayStrength = GetBoneReplayStrength(elapsed);
             bool futureActive = _futureAnimation != null &&
                 _futureAnimation.Running;
             UpdateFatalPush();
+            // A blast overrides the walk: carrying the gait's momentum would cancel it.
             DriveBodiesTowardAnimation(
-                futureActive ? worldFollowStrength : 0f);
+                futureActive && !_blastKill ? worldFollowStrength : 0f);
             foreach (Bone bone in _bones)
             {
-                UpdateBoneDrive(bone, futureActive, boneReplayStrength);
+                UpdateBoneDrive(bone, futureActive,
+                    _limpBodies.Contains(bone.Body) ? 0f
+                        : GetBoneReplayStrength(elapsed, bone.Region));
             }
 
             if (Settings.DebugLogging.Value && Time.unscaledTime >= _nextDebugLog)
@@ -653,10 +687,41 @@ namespace RagdollKinetics.Patches
                 _profile.WorldFollowDecay.Value, elapsed);
         }
 
-        private float GetBoneReplayStrength(float elapsed)
+        private float GetBoneReplayStrength(float elapsed, BoneRegion region)
         {
+            float duration = Mathf.Min(_profile.BoneReplayDecay.Value,
+                GetToneLoss(region).Value);
+            if ((_headShot && Settings.HeadshotLightsOut.Value) || _blastKill)
+                duration *= 0.25f;
+            else
+                duration /= _hitSeverity; // a heavy round cuts tone faster
             return EvaluateDecayCurve(_profile.BoneReplayStrength.Value, 0f,
-                _profile.BoneReplayDecay.Value, elapsed);
+                duration, elapsed);
+        }
+
+        private static ConfigEntry<float> GetToneLoss(BoneRegion region)
+        {
+            switch (region)
+            {
+                case BoneRegion.Leg: return Settings.LegToneLoss;
+                case BoneRegion.Arm: return Settings.ArmToneLoss;
+                case BoneRegion.Head: return Settings.HeadToneLoss;
+                default: return Settings.SpineToneLoss;
+            }
+        }
+
+        private static BoneRegion GetBoneRegion(string boneName)
+        {
+            string name = (boneName ?? string.Empty).ToLowerInvariant();
+            if (ContainsAnyFragment(name, "calf", "shin", "lowerleg", "thigh",
+                "upleg", "foot", "ankle"))
+                return BoneRegion.Leg;
+            if (ContainsAnyFragment(name, "forearm", "lowerarm", "upperarm",
+                "shoulder", "hand", "wrist"))
+                return BoneRegion.Arm;
+            if (ContainsAnyFragment(name, "head", "neck"))
+                return BoneRegion.Head;
+            return BoneRegion.Spine;
         }
 
         private static float EvaluateDecayCurve(float start, float end,
@@ -753,13 +818,13 @@ namespace RagdollKinetics.Patches
         {
             float driveScale = Mathf.Max(0f, strength / 100f);
             if (driveScale <= 0f) return;
-            float gravityInfluence = Mathf.Clamp01(driveScale);
             float spring = 80f * driveScale;
             float damper = 2f * Mathf.Sqrt(spring);
             float maximumAcceleration = 60f * driveScale;
             foreach (BodyFollower follower in _followers)
             {
-                if (follower.Body == null || follower.Target == null) continue;
+                if (follower.Body == null || follower.Target == null ||
+                    _limpBodies.Contains(follower.Body)) continue;
                 Vector3 targetPosition = follower.Target.position +
                     follower.Target.TransformVector(follower.LocalOffset);
                 follower.SampleAge += Time.fixedDeltaTime;
@@ -773,10 +838,14 @@ namespace RagdollKinetics.Patches
                     follower.LastTargetPosition = targetPosition;
                     follower.SampleAge = 0f;
                 }
-                Vector3 acceleration = -Physics.gravity * gravityInfluence +
-                    (targetPosition - follower.Body.worldCenterOfMass) * spring +
-                    (follower.TargetVelocity + _fatalPushVelocity -
-                        follower.Body.velocity) * damper;
+                Vector3 positionError =
+                    targetPosition - follower.Body.worldCenterOfMass;
+                Vector3 velocityError = follower.TargetVelocity +
+                    _fatalPushVelocity - follower.Body.velocity;
+                positionError.y = 0f;
+                velocityError.y = 0f;
+                Vector3 acceleration = positionError * spring +
+                    velocityError * damper;
                 follower.Body.AddForce(Vector3.ClampMagnitude(acceleration,
                     maximumAcceleration), ForceMode.Acceleration);
             }
@@ -793,22 +862,179 @@ namespace RagdollKinetics.Patches
             if (progress >= 1f) _fatalPushVelocity = Vector3.zero;
         }
 
-        internal bool CaptureFatalImpulse(Rigidbody hitBody,
+        internal void CaptureFatalImpulse(Rigidbody hitBody,
             Vector3 direction, Vector3 point, float thrust)
         {
-            if (direction.sqrMagnitude < 0.0001f || thrust <= 0f) return false;
+            if (hitBody != null &&
+                GetBoneRegion(hitBody.name) == BoneRegion.Head)
+                _headShot = true;
+            if (direction.sqrMagnitude < 0.0001f || thrust <= 0f) return;
             Vector3 push = direction.normalized * thrust *
                 Settings.ImpulseScale.Value * 0.2f;
             _fatalPushVelocity = Vector3.ClampMagnitude(
                 _fatalPushVelocity + push, 1.25f);
             _fatalPushInitialVelocity = _fatalPushVelocity;
             _fatalPushAge = 0f;
+            MarkStruckLimb(hitBody);
+            ApplyFallWithShot(hitBody, direction);
             if (Settings.DebugLogging.Value)
                 Plugin.Log.LogInfo(string.Format(
-                    "[RagdollDebug] Cached fatal push body={0} direction={1} thrust={2:0.00} velocity={3}",
+                    "[RagdollDebug] Cached fatal push body={0} direction={1} thrust={2:0.00} velocity={3} headShot={4}",
                     hitBody != null ? hitBody.name : "NULL", direction,
-                    thrust, _fatalPushVelocity));
-            return true;
+                    thrust, _fatalPushVelocity, _headShot));
+        }
+
+        private void ApplyFallWithShot(Rigidbody hitBody, Vector3 direction)
+        {
+            Vector3 push = new Vector3(direction.x, 0f, direction.z);
+            float speed = Settings.FallWithShot.Value;
+            if (_fallApplied || speed <= 0f || push.sqrMagnitude < 0.0001f)
+                return;
+            _fallApplied = true;
+            BoneRegion hitRegion = hitBody != null
+                ? GetBoneRegion(hitBody.name) : BoneRegion.Spine;
+            float roundPush = _shotEnergyFactor * _shotPenetrationFactor;
+            Vector3 along = push.normalized;
+            push = along * speed * roundPush *
+                (hitRegion == BoneRegion.Head ? 1.5f : 1f);
+            bool legHit = hitRegion == BoneRegion.Leg;
+            foreach (Rigidbody body in _bodies)
+            {
+                if (body == null || (legHit && _limpBodies.Contains(body)))
+                    continue;
+                float share = GetFallShare(body.name);
+                if (legHit) share *= 0.3f;
+                if (share > 0f)
+                    body.AddForce(push * share, ForceMode.VelocityChange);
+            }
+            if (legHit) KickLeg(hitBody, along, push.magnitude, roundPush);
+        }
+
+        // The struck leg swings back about its joint: each part moves in proportion to
+        // its distance from the pivot, so the foot travels about twice as fast as the
+        // knee and lifts a little off the ground. Heavy rounds kick harder.
+        private void KickLeg(Rigidbody hitBody, Vector3 along, float speed,
+            float roundPush)
+        {
+            Bone hitBone = _bones.Find(bone => bone.Body == hitBody);
+            if (hitBone == null || hitBone.Parent == null) return;
+            Vector3 pivot = hitBone.Parent.worldCenterOfMass;
+            float baseReach = Mathf.Max(0.05f,
+                Vector3.Distance(hitBody.worldCenterOfMass, pivot));
+            float kick = speed * 1.5f * Mathf.Sqrt(roundPush);
+            foreach (Rigidbody body in _limpBodies)
+            {
+                if (body == null) continue;
+                float reach = Vector3.Distance(body.worldCenterOfMass, pivot) /
+                    baseReach;
+                Vector3 velocity = along * kick * reach;
+                if (body != hitBody) velocity += Vector3.up * 0.3f * kick;
+                body.AddForce(velocity, ForceMode.VelocityChange);
+            }
+        }
+
+        // A struck leg, arm or head goes limp at once, from the hit down the limb.
+        private void MarkStruckLimb(Rigidbody hitBody)
+        {
+            if (hitBody == null || _limpBodies.Count > 0) return;
+            BoneRegion region = GetBoneRegion(hitBody.name);
+            if (region == BoneRegion.Spine) return;
+            _limpBodies.Add(hitBody);
+            foreach (Bone bone in _bones) // sorted parent-first
+                if (bone.Parent != null && _limpBodies.Contains(bone.Parent))
+                    _limpBodies.Add(bone.Body);
+        }
+
+        private void ReadKillingShot()
+        {
+            if (!Settings.ScaleByBullet.Value ||
+                !Impacts.TryGetShot(gameObject, out Impacts.ShotRecord shot))
+                return;
+            _shotEnergyFactor = Impacts.EnergyFactor(shot);
+            _shotPenetrationFactor = Impacts.PenetrationFactor(shot);
+            _hitSeverity = Mathf.Max(1f,
+                _shotEnergyFactor * _shotPenetrationFactor);
+            if (Settings.DebugLogging.Value)
+                Plugin.Log.LogInfo(string.Format(
+                    "[RagdollDebug] Killing shot {0}: {1:0} J, penetration {2:0}, push x{3:0.00}",
+                    name, shot.Energy, shot.Penetration,
+                    _shotEnergyFactor * _shotPenetrationFactor));
+        }
+
+        private void ApplyBlasts(bool killedByIt)
+        {
+            _lastBlastId = Impacts.CollectBlasts(_lastBlastId, _blastBuffer);
+            float push = Settings.ExplosionPush.Value;
+            if (push <= 0f || _blastBuffer.Count == 0) return;
+            Vector3 centre = _pelvisBody != null
+                ? _pelvisBody.position : transform.position;
+            foreach (Impacts.Blast blast in _blastBuffer)
+            {
+                if (Vector3.Distance(centre, blast.Position) > blast.Radius)
+                    continue;
+                if (killedByIt)
+                {
+                    _blastKill = true;
+                    _fallApplied = true;
+                }
+                // Away from a point just below the blast, falling off with the square
+                // of the distance. Each part gets its own share (light, exposed limbs
+                // more than the torso, +-25%, a few degrees off line, a little spin) so
+                // the body folds and flails instead of sliding as one block. The body
+                // keeps its own momentum; the blast only adds to it.
+                float strength = push *
+                    Mathf.Clamp(blast.Strength / 100f, 0.3f, 2f);
+                Vector3 source = blast.Position - Vector3.up * 0.3f;
+                foreach (Rigidbody body in _bodies)
+                {
+                    if (body == null) continue;
+                    Vector3 part = body.worldCenterOfMass;
+                    float reach = Vector3.Distance(part, blast.Position);
+                    if (reach >= blast.Radius) continue;
+                    float falloff = 1f - reach / blast.Radius;
+                    Vector3 away = part - source;
+                    away = away.sqrMagnitude > 0.0001f ? away.normalized
+                        : Vector3.up;
+                    away = Quaternion.Euler(Random.Range(-10f, 10f),
+                        Random.Range(-10f, 10f), 0f) * away;
+                    float speed = strength * falloff * falloff *
+                        GetBlastExposure(body.name) * Random.Range(0.75f, 1.25f);
+                    body.AddForce(away * speed, ForceMode.VelocityChange);
+                    body.AddTorque(Random.onUnitSphere * speed * 0.8f,
+                        ForceMode.VelocityChange);
+                }
+                if (Settings.DebugLogging.Value)
+                    Plugin.Log.LogInfo(string.Format(
+                        "[RagdollDebug] Blast {0} pushed {1}: {2:0.0} m away, strength {3:0}, killed by it {4}",
+                        blast.Id, name,
+                        Vector3.Distance(centre, blast.Position),
+                        blast.Strength, killedByIt));
+            }
+        }
+
+        private static float GetBlastExposure(string boneName)
+        {
+            switch (GetBoneRegion(boneName))
+            {
+                case BoneRegion.Head: return 1.1f;
+                case BoneRegion.Arm: return 1.4f;
+                case BoneRegion.Leg: return 1.25f;
+                default: return 0.8f;
+            }
+        }
+
+        private static float GetFallShare(string boneName)
+        {
+            if ((boneName ?? string.Empty).ToLowerInvariant()
+                .Contains("pelvis"))
+                return 0.2f;
+            switch (GetBoneRegion(boneName))
+            {
+                case BoneRegion.Head: return 1f;
+                case BoneRegion.Spine: return 0.8f;
+                case BoneRegion.Arm: return 0.6f;
+                default: return 0f;
+            }
         }
 
         private int GetBoneDepth(Bone bone)
