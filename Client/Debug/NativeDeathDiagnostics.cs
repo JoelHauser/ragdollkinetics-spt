@@ -41,6 +41,7 @@ namespace RagdollKinetics
         private string _profileId;
         private long _lastBoundaryTimestamp;
         private string _lastBoundary = "none";
+        private bool _tracingInstalled;
 
         private void Awake()
         {
@@ -52,6 +53,7 @@ namespace RagdollKinetics
 
         private void InstallPlayerLoopTracing()
         {
+            _tracingInstalled = true;
             PlayerLoopSystem loop = PlayerLoop.GetCurrentPlayerLoop();
             if (ContainsLoopBoundary(loop))
             {
@@ -107,6 +109,7 @@ namespace RagdollKinetics
 
         private void UninstallPlayerLoopTracing()
         {
+            _tracingInstalled = false;
             PlayerLoopSystem loop = PlayerLoop.GetCurrentPlayerLoop();
             if (!RemoveLoopBoundaries(ref loop)) return;
             PlayerLoop.SetPlayerLoop(loop);
@@ -211,16 +214,12 @@ namespace RagdollKinetics
                         if (marker.Recorder.Valid && marker.Recorder.IsRunning)
                             marker.Recorder.Stop();
                 }
-                if (ContainsLoopBoundary(PlayerLoop.GetCurrentPlayerLoop()))
-                    UninstallPlayerLoopTracing();
+                if (_tracingInstalled) UninstallPlayerLoopTracing();
                 return;
             }
             if (!_discovered)
                 DiscoverMarkers();
-            if (!ContainsLoopBoundary(PlayerLoop.GetCurrentPlayerLoop()))
-            {
-                InstallPlayerLoopTracing();
-            }
+            if (!_tracingInstalled) InstallPlayerLoopTracing();
         }
 
         private void DiscoverMarkers()
@@ -316,7 +315,7 @@ namespace RagdollKinetics
 
         private void OnDestroy()
         {
-            UninstallPlayerLoopTracing();
+            if (_tracingInstalled) UninstallPlayerLoopTracing();
             foreach (Marker marker in _markers) marker.Dispose();
             _markers.Clear();
             if (_instance == this) _instance = null;

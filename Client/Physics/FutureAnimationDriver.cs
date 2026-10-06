@@ -56,6 +56,8 @@ namespace RagdollKinetics.Patches
         private bool _hasMotionRootReference;
         private float _lastPoseLevel = 1f;
         private Settings.DeathMotion _deathMotion = Settings.DeathMotion.Standing;
+        private static int _lastBuildFrame = -1;
+        private long _buildStarted;
 
         internal bool Running => _running && _ready;
         internal Vector3 TravelVelocity => _deathVelocity;
@@ -136,6 +138,9 @@ namespace RagdollKinetics.Patches
                 return;
             }
             if (_sourceRoot == null) return;
+            if (Time.frameCount == _lastBuildFrame) return;
+            _lastBuildFrame = Time.frameCount;
+            _buildStarted = Perf.Enabled ? Perf.Start() : 0L;
 
             _driverRoot = new GameObject("RagdollKinetics.FutureAnimation");
             _driverRoot.hideFlags = HideFlags.HideAndDontSave;
@@ -162,6 +167,7 @@ namespace RagdollKinetics.Patches
                     _sourceUnity.runtimeAnimatorController;
                 _driverUnity.enabled = false;
                 _ready = true;
+                ReportBuilt("UnityAnimator");
                 if (Settings.DebugLogging.Value)
                     Plugin.Log.LogInfo("[FutureAnimation] Prepared " + name +
                         " source=UnityAnimator targets=" +
@@ -203,6 +209,7 @@ namespace RagdollKinetics.Patches
                 i < _driver.layerCount; i++)
                 _driver.SetLayerWeight(i, _playable.initialLayerInfo[i].weight);
             _ready = true;
+            ReportBuilt("FastAnimator");
             if (Settings.DebugLogging.Value)
                 Plugin.Log.LogInfo("[FutureAnimation] Prepared " + name +
                     " source=" + _source.GetType().Name + " targets=" +
@@ -283,7 +290,12 @@ namespace RagdollKinetics.Patches
             if (_simulationElapsed >= maximumLifetime)
             {
                 _running = false;
+                long started = Perf.Enabled ? Perf.Start() : 0L;
                 DestroyDriver();
+                if (Perf.Enabled)
+                    Perf.Log(string.Format(
+                        "corpse {0}: animation copy removed in {1:0.00} ms",
+                        name, Perf.Milliseconds(started)));
                 return;
             }
 
@@ -575,6 +587,15 @@ namespace RagdollKinetics.Patches
                 if (found != null) return found;
             }
             return null;
+        }
+
+        private void ReportBuilt(string source)
+        {
+            if (!Perf.Enabled) return;
+            Perf.Log(string.Format(
+                "spawn {0}: animation copy built in {1:0.00} ms ({2}, {3} transforms cloned)",
+                name, Perf.Milliseconds(_buildStarted), source,
+                _animationTargetsByName.Count));
         }
 
         private void ReportUnavailable(string reason)

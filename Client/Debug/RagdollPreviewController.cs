@@ -66,10 +66,6 @@ namespace RagdollKinetics
             if (Settings.PreviewEnabled.Value) StartPreview();
         }
 
-        private void Update()
-        {
-        }
-
         private void OnDestroy()
         {
             Settings.PreviewEnabled.SettingChanged -= OnEnabledChanged;

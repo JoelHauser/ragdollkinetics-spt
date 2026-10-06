@@ -50,6 +50,8 @@ namespace RagdollKinetics
         internal static ConfigEntry<float> RagdollMassScale { get; private set; }
         internal static ConfigEntry<bool> TeleportRagdollOnGlitch { get; private set; }
         internal static ConfigEntry<float> FreezeDelay { get; private set; }
+        internal static ConfigEntry<bool> FreezeWhenSettled { get; private set; }
+        internal static ConfigEntry<bool> PerformanceLogging { get; private set; }
         internal static ConfigEntry<bool> PreviewEnabled { get; private set; }
         internal static ConfigEntry<PreviewMotion> PreviewMode { get; private set; }
         internal static ConfigEntry<float> PreviewRouteLength { get; private set; }
@@ -78,6 +80,10 @@ namespace RagdollKinetics
             Enabled = Toggle(config, Ragdolls, "Enabled", true, "Enable Ragdoll Kinetics.", "Enabled", 1220);
             BindSeparator(config, "CorpsePhysicsSeparator", "Corpse Physics", 750);
             FreezeDelay = Range(config, Ragdolls, "FreezeDelay", 15f, "Seconds before EFT freezes corpse physics.", 2f, 60f, "Corpse Freeze Delay", 700);
+            FreezeWhenSettled = Toggle(config, Ragdolls,
+                "FreezeWhenSettled", true,
+                "Once the death animation has played out, let the corpse sleep and freeze as soon as it comes to rest, as EFT does, instead of simulating it for the full freeze delay. Off keeps every corpse awake and shootable until the delay.",
+                "Freeze Corpses Once Settled", 695);
             ImpulseScale = Range(config, Ragdolls, "ImpulseScale", 0.5f, "Scale applied to EFT's fatal-shot impulse and cached puppet push.", 0f, 1f, "Fatal Impulse Scale", 690);
             FatalPushDecay = Range(config, Ragdolls, "FatalPushDecay", 0.65f,
                 "Seconds for a cached fatal-hit push to lose its velocity.",
@@ -91,6 +97,10 @@ namespace RagdollKinetics
                 "Return the complete ragdoll to its saved death position if any single bone travels more than 35 metres away.",
                 "Teleport Ragdoll back on glitch", 660);
             DebugLogging = Toggle(config, Ragdolls, "DebugLogging", false, "Write detailed joint diagnostics to the BepInEx log.", "Debug Logging", 100);
+            PerformanceLogging = Toggle(config, Ragdolls,
+                "PerformanceLogging", false,
+                "Write one [Perf] line per bot spawn, death and settled corpse with the time the mod spent on it.",
+                "Performance Logging", 90);
 
             Round(FreezeDelay);
             Round(ImpulseScale);

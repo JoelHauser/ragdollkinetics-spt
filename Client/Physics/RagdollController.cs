@@ -248,6 +248,13 @@ namespace RagdollKinetics.Patches
         private float _lastPelvisDebugTime;
         private Vector3 _deathPosition;
         private bool _hasDeathPosition;
+        private readonly Dictionary<Rigidbody, Vector2Int> _solverDefaults =
+            new Dictionary<Rigidbody, Vector2Int>(20);
+        private float _activeSeconds;
+        private bool _released;
+        private int _activeSteps;
+        private double _activeMilliseconds;
+        private double _slowestStepMilliseconds;
         internal bool AllowFreeze
         {
             get
@@ -256,6 +263,14 @@ namespace RagdollKinetics.Patches
                     Settings.FreezeDelay.Value);
             }
         }
+
+        internal bool AllowSleep =>
+            Settings.FreezeWhenSettled.Value ? _released : AllowFreeze;
+
+        internal bool ShouldFreeze(bool sleeping) =>
+            Settings.FreezeWhenSettled.Value
+                ? _released && (sleeping || AllowFreeze)
+                : AllowFreeze;
 
         internal void InitializeRagdoll(CorpseRagdoll ragdoll,
             FutureAnimationDriver futureAnimation = null)
@@ -267,6 +282,11 @@ namespace RagdollKinetics.Patches
                 ? _futureAnimation.Profile : Settings.StandingDeath;
             _futureAnimation?.UsePhysicsClock();
             _started = Time.time;
+            _activeSeconds = (_futureAnimation != null
+                ? Mathf.Max(_profile.WorldFollowDecay.Value,
+                    Mathf.Max(_profile.BoneReplayDecay.Value,
+                        _profile.MomentumDecay.Value))
+                : 0f) + 0.25f;
 
             foreach (CharacterJointSpawner spawner in ragdoll._jointSpawners)
             {
@@ -461,8 +481,11 @@ namespace RagdollKinetics.Patches
             return Quaternion.LookRotation(forward, up);
         }
 
-        private static void ConfigureBody(Rigidbody body)
+        private void ConfigureBody(Rigidbody body)
         {
+            if (!_solverDefaults.ContainsKey(body))
+                _solverDefaults[body] = new Vector2Int(body.solverIterations,
+                    body.solverVelocityIterations);
             body.solverIterations = Mathf.Max(body.solverIterations, 12);
             body.solverVelocityIterations = Mathf.Max(body.solverVelocityIterations, 6);
             body.maxAngularVelocity = Mathf.Min(body.maxAngularVelocity, 12f);
@@ -487,6 +510,8 @@ namespace RagdollKinetics.Patches
             if (Time.frameCount == _firstPhysicsFrame) return;
 
             RecoverGlitchedRagdoll();
+            if (_released) return;
+            long started = Perf.Enabled ? Perf.Start() : 0L;
 
             _futureAnimation?.StepPhysics(Time.fixedDeltaTime);
             _physicsElapsed += Time.fixedDeltaTime;
@@ -509,6 +534,39 @@ namespace RagdollKinetics.Patches
                 _nextDebugLog = Time.unscaledTime + 1f;
                 LogJointState("live");
             }
+
+            if (Perf.Enabled)
+            {
+                double step = Perf.Milliseconds(started);
+                _activeSteps++;
+                _activeMilliseconds += step;
+                _slowestStepMilliseconds = System.Math.Max(
+                    _slowestStepMilliseconds, step);
+            }
+            if (!futureActive && elapsed >= _activeSeconds)
+                ReleaseDrives();
+        }
+
+        private void ReleaseDrives()
+        {
+            _released = true;
+            foreach (Bone bone in _bones)
+                if (bone.Joint != null)
+                    bone.Joint.slerpDrive = new JointDrive();
+            foreach (KeyValuePair<Rigidbody, Vector2Int> body in
+                _solverDefaults)
+            {
+                if (body.Key == null) continue;
+                body.Key.solverIterations = body.Value.x;
+                body.Key.solverVelocityIterations = body.Value.y;
+            }
+            _followers.Clear();
+            if (Perf.Enabled)
+                Perf.Log(string.Format(
+                    "corpse {0}: animation phase done after {1:0.00} s, {2} physics steps, {3:0.000} ms average, {4:0.000} ms slowest",
+                    name, _physicsElapsed, _activeSteps,
+                    _activeSteps > 0 ? _activeMilliseconds / _activeSteps : 0d,
+                    _slowestStepMilliseconds));
         }
 
         private void UpdateBoneDrive(Bone bone, bool futureActive,
@@ -545,9 +603,6 @@ namespace RagdollKinetics.Patches
         private void ApplyAnimationDrive(Bone bone,
             Quaternion animationLocal, float strength)
         {
-            bone.Joint.angularXMotion = ConfigurableJointMotion.Limited;
-            bone.Joint.angularYMotion = ConfigurableJointMotion.Limited;
-            bone.Joint.angularZMotion = ConfigurableJointMotion.Limited;
             Quaternion animationDelta = animationLocal *
                 Quaternion.Inverse(bone.AnimationStartLocal);
             Quaternion desiredLocal = animationDelta *
