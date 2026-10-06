@@ -4,9 +4,9 @@
     <RootNamespace>RagdollKinetics</RootNamespace>
     <AssemblyName>RagdollKinetics</AssemblyName>
     <Authors>Hysocs</Authors>
-    <Version>1.3.0</Version>
-    <AssemblyVersion>1.3.0</AssemblyVersion>
-    <FileVersion>1.3.0</FileVersion>
+    <Version>1.3.1</Version>
+    <AssemblyVersion>1.3.1</AssemblyVersion>
+    <FileVersion>1.3.1</FileVersion>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <SptRoot Condition="'$(SptRoot)' == ''">C:\SPT\4.1.2</SptRoot>

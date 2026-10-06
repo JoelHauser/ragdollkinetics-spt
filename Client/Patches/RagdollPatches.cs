@@ -3,6 +3,7 @@ using System.Reflection;
 using EFT;
 using EFT.AssetsManager;
 using EFT.Interactive;
+using EFT.InventoryLogic;
 using HarmonyLib;
 using SPT.Reflection.Patching;
 using UnityEngine;
@@ -47,12 +48,13 @@ namespace RagdollKinetics.Patches
             }
         }
 
-        // Every bullet that hits a player passes through GameWorld.ShotDelegate with
-        // its mass and impact velocity; remember them on the player it hit.
+        // Every bullet that hits a player passes through GameWorld.ShotDelegate;
+        // remember its caliber (and, for calibers the table doesn't know, its impact
+        // energy) on the player it hit.
         private sealed class RecordShotPatch : RagdollPatch
         {
-            private static System.Func<object, object> _hitCollider, _mass,
-                _velocity, _initialSpeed, _penetration, _fireIndex;
+            private static System.Func<object, object> _hitCollider, _ammo,
+                _mass, _velocity, _initialSpeed, _fireIndex;
             private static bool _failed;
 
             protected override MethodBase GetTargetMethod()
@@ -61,10 +63,10 @@ namespace RagdollKinetics.Patches
                     "ShotDelegate");
                 System.Type shot = method.GetParameters()[0].ParameterType;
                 _hitCollider = Getter(shot, "HitCollider");
+                _ammo = Getter(shot, "Ammo");
                 _mass = Getter(shot, "BulletMassGram");
                 _velocity = Getter(shot, "CurrentVelocity");
                 _initialSpeed = Getter(shot, "InitialSpeed");
-                _penetration = Getter(shot, "PenetrationPower");
                 _fireIndex = Getter(shot, "FireIndex");
                 return method;
             }
@@ -73,20 +75,22 @@ namespace RagdollKinetics.Patches
             private static void PatchPrefix(object __0)
             {
                 if (_failed || !Settings.Enabled.Value || __0 == null ||
-                    _hitCollider == null || _mass == null) return;
+                    _hitCollider == null) return;
                 try
                 {
                     Collider hit = _hitCollider(__0) as Collider;
                     Player target = hit != null
                         ? hit.GetComponentInParent<Player>() : null;
                     if (target == null) return;
+                    AmmoTemplate round = _ammo != null
+                        ? (_ammo(__0) as Item)?.Template as AmmoTemplate : null;
                     float speed = _velocity != null
                         ? ((Vector3)_velocity(__0)).magnitude : 0f;
                     if (speed <= 0f && _initialSpeed != null)
                         speed = (float)_initialSpeed(__0);
-                    float mass = (float)_mass(__0) / 1000f;
-                    Impacts.RecordShot(target, 0.5f * mass * speed * speed,
-                        _penetration != null ? (float)_penetration(__0) : 0f,
+                    float mass = _mass != null ? (float)_mass(__0) / 1000f : 0f;
+                    Impacts.RecordShot(target, round?.Caliber,
+                        0.5f * mass * speed * speed,
                         _fireIndex != null ? (int)_fireIndex(__0) : 0);
                 }
                 catch (System.Exception exception)
@@ -324,7 +328,7 @@ namespace RagdollKinetics.Patches
                 skeleton.CaptureFatalImpulse(rigidbody, direction, point,
                     thrust);
             thrust *= Settings.ImpulseScale.Value *
-                (skeleton != null ? skeleton.ShotEnergyFactor : 1f);
+                (skeleton != null ? skeleton.ShotImpulseFactor : 1f);
             return true;
         }
 

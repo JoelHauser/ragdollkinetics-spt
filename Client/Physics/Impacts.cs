@@ -11,8 +11,8 @@ namespace RagdollKinetics.Patches
         internal struct ShotRecord
         {
             internal float Time;
+            internal string Caliber;
             internal float Energy;
-            internal float Penetration;
             internal int FireIndex;
         }
 
@@ -25,8 +25,44 @@ namespace RagdollKinetics.Patches
             internal float Strength;
         }
 
-        // Impact energy at which a soft round pushes at the settings' face value;
-        // a 7.62x54R LPS comes out close to it once its penetration is counted.
+        // One push per caliber, whatever the round (FMJ, HP, AP...), from the energy of
+        // the caliber's typical round in the SPT 4.1 item database through
+        // RoundPushForEnergy. Calibers not listed (modded ones) use their round's
+        // measured energy instead.
+        private static readonly Dictionary<string, float> CaliberPush =
+            new Dictionary<string, float>
+        {
+            { "Caliber9x18PM", 0.46f },
+            { "Caliber46x30", 0.53f },
+            { "Caliber9x19PARA", 0.58f },
+            { "Caliber762x25TT", 0.62f },
+            { "Caliber1143x23ACP", 0.66f }, // .45 ACP
+            { "Caliber9x21", 0.66f },
+            { "Caliber57x28", 0.74f },
+            { "Caliber9x39", 0.77f },
+            { "Caliber9x33R", 0.87f }, // .357 Magnum
+            { "Caliber545x39", 1.04f },
+            { "Caliber23x75", 1.07f }, // KS-23
+            { "Caliber556x45NATO", 1.20f },
+            { "Caliber762x39", 1.37f },
+            { "Caliber762x35", 1.39f }, // .300 Blackout
+            { "Caliber20g", 1.41f },
+            { "Caliber366TKM", 1.43f },
+            { "Caliber127x33", 1.45f }, // .50 AE
+            { "Caliber12g", 1.47f },
+            { "Caliber127x55", 1.59f },
+            { "Caliber762x51", 1.86f },
+            { "Caliber762x54R", 1.94f },
+            { "Caliber68x51", 1.96f },
+            { "Caliber86x70", 2.76f }, // .338 Lapua Magnum
+            { "Caliber127x108", 3.50f },
+            { "Caliber127x99", 3.50f }, // .50 BMG
+            { "Caliber20x1mm", 0.40f },
+            { "Caliber26x75", 0.40f }, // flares
+            { "Caliber40x46", 0.40f }
+        };
+
+        // Impact energy at which the push settings apply at face value.
         private const float ReferenceEnergy = 1300f;
         private const float ShotMemory = 1f;
         private const float BlastMemory = 0.5f;
@@ -37,8 +73,8 @@ namespace RagdollKinetics.Patches
         private static readonly List<Blast> Blasts = new List<Blast>(8);
         private static int _nextBlastId;
 
-        internal static void RecordShot(Player target, float energy,
-            float penetration, int fireIndex)
+        internal static void RecordShot(Player target, string caliber,
+            float energy, int fireIndex)
         {
             int key = target.gameObject.GetInstanceID();
             float now = Time.time;
@@ -49,8 +85,8 @@ namespace RagdollKinetics.Patches
             Shots[key] = new ShotRecord
             {
                 Time = now,
+                Caliber = caliber,
                 Energy = energy,
-                Penetration = penetration,
                 FireIndex = fireIndex
             };
             if (Shots.Count > 128) PruneShots(now);
@@ -62,19 +98,19 @@ namespace RagdollKinetics.Patches
                 Time.time - record.Time <= ShotMemory;
         }
 
-        // How hard this round hits relative to the reference. Below it the push grows
-        // with the square root of energy; above it, faster, so the heavy hitters
-        // (.338, .50 BMG, 12.7 mm, slugs) stand out.
-        internal static float EnergyFactor(ShotRecord record)
+        internal static float RoundPush(ShotRecord record) =>
+            record.Caliber != null &&
+            CaliberPush.TryGetValue(record.Caliber, out float push)
+                ? push : RoundPushForEnergy(record.Energy);
+
+        // Below the reference the push grows with the square root of energy; above it,
+        // faster, so the heavy hitters stand out. Capped at x3.5.
+        internal static float RoundPushForEnergy(float energy)
         {
-            float ratio = Mathf.Max(0f, record.Energy) / ReferenceEnergy;
+            float ratio = Mathf.Max(0f, energy) / ReferenceEnergy;
             return Mathf.Clamp(ratio < 1f ? Mathf.Sqrt(ratio)
                 : Mathf.Pow(ratio, 0.65f), 0.4f, 3.5f);
         }
-
-        // Rounds that pass straight through (high penetration) give up to a quarter less.
-        internal static float PenetrationFactor(ShotRecord record) =>
-            0.75f + 0.25f * Mathf.InverseLerp(50f, 20f, record.Penetration);
 
         internal static void RecordBlast(Vector3 position, float radius,
             float strength)
