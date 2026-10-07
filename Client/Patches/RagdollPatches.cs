@@ -12,6 +12,12 @@ namespace RagdollKinetics.Patches
 {
     internal static class RagdollPatches
     {
+        private static readonly ModulePatch[] PreviewPatches =
+        {
+            new PreviewBotManualUpdatePatch(),
+            new PreviewBotFixedUpdatePatch()
+        };
+
         internal static List<ModulePatch> CreateAll() =>
             new List<ModulePatch>
             {
@@ -23,11 +29,33 @@ namespace RagdollKinetics.Patches
                 new KeepRagdollReactivePatch(),
                 new DelayRagdollFreezePatch(),
                 new AiHitAimStabilityPatch(),
-                new PreviewBotManualUpdatePatch(),
-                new PreviewBotFixedUpdatePatch(),
+                PreviewPatches[0],
+                PreviewPatches[1],
                 new RecordShotPatch(),
                 new RecordBlastPatch()
             };
+
+        // The preview loop's two hooks run on every bot's update every frame, so
+        // they are only in place while the preview loop is switched on.
+        internal static void SyncPreviewPatches()
+        {
+            bool wanted = Settings.PreviewEnabled.Value;
+            foreach (ModulePatch patch in PreviewPatches)
+            {
+                if (patch.IsActive == wanted) continue;
+                try
+                {
+                    if (wanted) patch.Enable();
+                    else patch.Disable();
+                }
+                catch (System.Exception exception)
+                {
+                    Plugin.Log.LogError("[RagdollPreview] Could not " +
+                        (wanted ? "enable " : "disable ") +
+                        patch.GetType().Name + ": " + exception);
+                }
+            }
+        }
 
         private abstract class RagdollPatch : ModulePatch
         {
@@ -345,10 +373,7 @@ namespace RagdollKinetics.Patches
             PlayerRigidbodySleepHierarchy __instance, ref bool __result)
         {
             if (!Settings.Enabled.Value) return true;
-            RigidbodySpawner spawner = __instance != null
-                ? __instance.RigidbodySpawner : null;
-            RagdollSkeleton skeleton = spawner != null
-                ? spawner.GetComponentInParent<RagdollSkeleton>() : null;
+            RagdollSkeleton skeleton = RagdollSkeleton.ForSleepPart(__instance);
             if (skeleton == null || skeleton.AllowSleep) return true;
 
             __result = false;

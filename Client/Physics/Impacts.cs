@@ -73,6 +73,10 @@ namespace RagdollKinetics.Patches
         private static readonly List<Blast> Blasts = new List<Blast>(8);
         private static int _nextBlastId;
 
+        // Corpses compare this every physics step and skip the blast list while it
+        // has not moved.
+        internal static int LatestBlastId => _nextBlastId;
+
         internal static void RecordShot(Player target, string caliber,
             float energy, int fireIndex)
         {

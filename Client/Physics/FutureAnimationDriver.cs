@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using AnimationSystem;
 using AnimationSystem.RootMotionTable;
 using Comfort.Common;
@@ -59,11 +61,29 @@ namespace RagdollKinetics.Patches
         private static int _lastBuildFrame = -1;
         private long _buildStarted;
 
+        // TextAsset.bytes copies the whole asset on every read and it never changes,
+        // so it is read once per skeleton type (0 full, 1 simplified).
+        private static readonly byte[][] ControllerBytes = new byte[2][];
+        private const int MaximumParallelParses = 2;
+        private static int _parsesInFlight;
+        private static bool _parseOnMainThread;
+        private Task<FastAnimatorController> _parse;
+        private bool _parseSimplified;
+        private FastAnimatorController _parsedController;
+        private double _parseMilliseconds;
+
         internal bool Running => _running && _ready;
         internal Vector3 TravelVelocity => _deathVelocity;
         internal Settings.DeathMotion DeathMotion => _deathMotion;
         internal Settings.DeathProfile Profile =>
             Settings.GetDeathProfile(_deathMotion);
+
+        // LateUpdate only has work between death and the hand-off to the physics
+        // clock; the rest of the time the component stays disabled.
+        private void Awake()
+        {
+            enabled = false;
+        }
 
         internal void CaptureLivingMotion()
         {
@@ -106,6 +126,7 @@ namespace RagdollKinetics.Patches
                 _sourceUnity = null;
                 _driverUnity = null;
                 _playable = null;
+                _physicsDriven = false;
             }
             if (player == null || player.PlayerBones == null ||
                 player.PlayerBones.PlayableAnimator == null)
@@ -138,6 +159,8 @@ namespace RagdollKinetics.Patches
                 return;
             }
             if (_sourceRoot == null) return;
+            if (_fastMode && !TakeParsedController(player.UsedSimplifiedSkeleton))
+                return;
             if (Time.frameCount == _lastBuildFrame) return;
             _lastBuildFrame = Time.frameCount;
             _buildStarted = Perf.Enabled ? Perf.Start() : 0L;
@@ -184,10 +207,8 @@ namespace RagdollKinetics.Patches
                 : Array.Empty<InitialLayerInfo>();
 
             bool simplified = player.UsedSimplifiedSkeleton;
-            TextAsset controllerAsset = Singleton<IEasyAssets>.Instance
-                .GetAsset<TextAsset>(simplified
-                    ? InGameBundles.ZOMBIE_FAST_ANIMATOR_CONTROLLER
-                    : InGameBundles.PLAYER_FAST_ANIMATOR_CONTROLLER);
+            FastAnimatorController controller = _parsedController;
+            _parsedController = null;
             RootMotionBlendTable rootTable = Singleton<IEasyAssets>.Instance
                 .GetAsset<RootMotionBlendTable>(simplified
                     ? InGameBundles.ZOMBIE_ROOTMOTION_TABLE
@@ -197,9 +218,6 @@ namespace RagdollKinetics.Patches
                     ? InGameBundles.ZOMBIE_ANIMATION_CLIPS_KEEPER
                     : InGameBundles.PLAYER_ANIMATION_CLIPS_KEEPER);
             rootTable.LoadNodes();
-            FastAnimatorController controller =
-                FastAnimatorControllerJsonSerializator.Deserialize(
-                    controllerAsset.bytes);
             _driver = AnimatorFactory.CreateAnimator(controller,
                 rootTable._loadedNodes, root, _playable) as FastAnimatorProcessor;
             _playable.Init(_driver, _driver.GetParametersCache(), rootTable,
@@ -219,7 +237,13 @@ namespace RagdollKinetics.Patches
 
         internal void CaptureDeathAnimation()
         {
-            if (!_ready) return;
+            if (!_ready)
+            {
+                // Died before its copy was built; a parse in flight is no use now.
+                _parse = null;
+                _parsedController = null;
+                return;
+            }
             CaptureWorldAnchor();
             if (!_fastMode)
             {
@@ -235,6 +259,7 @@ namespace RagdollKinetics.Patches
             _captureFrame = Time.frameCount;
             _discardFirstPostCaptureUpdate = true;
             _running = true;
+            enabled = !_physicsDriven;
             _playable.Process(true, 0f);
             ApplyWorldAnchor(0f);
             AlignMotionRootAtDeath();
@@ -271,12 +296,27 @@ namespace RagdollKinetics.Patches
         internal void UsePhysicsClock()
         {
             _physicsDriven = true;
+            enabled = false;
         }
 
         internal void StepPhysics(float step)
         {
             if (!_physicsDriven || !_running || !_ready) return;
             Advance(Mathf.Max(0f, step));
+        }
+
+        // The corpse stops the copy as soon as its last muscle lets go, usually well
+        // before the copy's own lifetime below runs out.
+        internal void Stop()
+        {
+            if (!_running) return;
+            float lived = _simulationElapsed;
+            long started = Perf.Enabled ? Perf.Start() : 0L;
+            DestroyDriver();
+            if (Perf.Enabled)
+                Perf.Log(string.Format(
+                    "corpse {0}: animation copy removed after {1:0.00} s, in {2:0.00} ms",
+                    name, lived, Perf.Milliseconds(started)));
         }
 
         private void Advance(float step)
@@ -289,13 +329,7 @@ namespace RagdollKinetics.Patches
                     profile.MomentumDecay.Value)) + 0.25f;
             if (_simulationElapsed >= maximumLifetime)
             {
-                _running = false;
-                long started = Perf.Enabled ? Perf.Start() : 0L;
-                DestroyDriver();
-                if (Perf.Enabled)
-                    Perf.Log(string.Format(
-                        "corpse {0}: animation copy removed in {1:0.00} ms",
-                        name, Perf.Milliseconds(started)));
+                Stop();
                 return;
             }
 
@@ -408,6 +442,7 @@ namespace RagdollKinetics.Patches
             _captureFrame = Time.frameCount;
             _discardFirstPostCaptureUpdate = true;
             _running = true;
+            enabled = !_physicsDriven;
             ApplyWorldAnchor(0f);
             AlignMotionRootAtDeath();
             CaptureMotionRootReference();
@@ -593,9 +628,85 @@ namespace RagdollKinetics.Patches
         {
             if (!Perf.Enabled) return;
             Perf.Log(string.Format(
-                "spawn {0}: animation copy built in {1:0.00} ms ({2}, {3} transforms cloned)",
+                "spawn {0}: animation copy built in {1:0.00} ms on the main thread ({2}, {3} transforms cloned){4}",
                 name, Perf.Milliseconds(_buildStarted), source,
-                _animationTargetsByName.Count));
+                _animationTargetsByName.Count, _fastMode
+                    ? string.Format(", controller parsed in {0:0.00} ms on {1}",
+                        _parseMilliseconds, _parseOnMainThread
+                            ? "the main thread" : "a worker thread")
+                    : ""));
+        }
+
+        // Parsing the animator controller only builds plain C# objects, so it runs
+        // on a worker thread; the rest of the copy needs Unity and is built on the
+        // main thread once the parse is done, one bot per frame. The game parses
+        // its own copy for every bot as well, on the main thread.
+        private bool TakeParsedController(bool simplified)
+        {
+            if (_parsedController != null && _parseSimplified == simplified)
+                return true;
+            _parsedController = null;
+            if (_parseOnMainThread)
+            {
+                if (Time.frameCount == _lastBuildFrame) return false;
+                _parseSimplified = simplified;
+                long started = Perf.Start();
+                _parsedController = FastAnimatorControllerJsonSerializator
+                    .Deserialize(GetControllerBytes(simplified));
+                _parseMilliseconds = Perf.Milliseconds(started);
+                return true;
+            }
+            if (_parse == null)
+            {
+                if (Volatile.Read(ref _parsesInFlight) >= MaximumParallelParses)
+                    return false;
+                byte[] bytes = GetControllerBytes(simplified);
+                _parseSimplified = simplified;
+                Interlocked.Increment(ref _parsesInFlight);
+                _parse = Task.Run(() =>
+                {
+                    try
+                    {
+                        long started = Perf.Start();
+                        FastAnimatorController controller =
+                            FastAnimatorControllerJsonSerializator.Deserialize(bytes);
+                        _parseMilliseconds = Perf.Milliseconds(started);
+                        return controller;
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref _parsesInFlight);
+                    }
+                });
+                return false;
+            }
+            if (!_parse.IsCompleted) return false;
+            Task<FastAnimatorController> parse = _parse;
+            _parse = null;
+            if (parse.IsFaulted || parse.IsCanceled)
+            {
+                _parseOnMainThread = true;
+                Plugin.Log.LogWarning("[FutureAnimation] Parsing the animator " +
+                    "controller on a worker thread failed; parsing it on the " +
+                    "main thread from now on, as before: " +
+                    (parse.Exception != null
+                        ? parse.Exception.GetBaseException().ToString()
+                        : "cancelled"));
+                return false;
+            }
+            _parsedController = parse.Result;
+            return _parseSimplified == simplified;
+        }
+
+        private static byte[] GetControllerBytes(bool simplified)
+        {
+            int index = simplified ? 1 : 0;
+            if (ControllerBytes[index] == null)
+                ControllerBytes[index] = Singleton<IEasyAssets>.Instance
+                    .GetAsset<TextAsset>(simplified
+                        ? InGameBundles.ZOMBIE_FAST_ANIMATOR_CONTROLLER
+                        : InGameBundles.PLAYER_FAST_ANIMATOR_CONTROLLER).bytes;
+            return ControllerBytes[index];
         }
 
         private void ReportUnavailable(string reason)
@@ -636,6 +747,8 @@ namespace RagdollKinetics.Patches
 
         private void OnDestroy()
         {
+            _parse = null;
+            _parsedController = null;
             DestroyDriver();
         }
 
@@ -643,6 +756,7 @@ namespace RagdollKinetics.Patches
         {
             _ready = false;
             _running = false;
+            enabled = false;
             if (_driverRoot != null)
             {
                 Destroy(_driverRoot);

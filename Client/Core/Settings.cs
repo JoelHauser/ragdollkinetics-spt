@@ -60,6 +60,8 @@ namespace RagdollKinetics
         internal static ConfigEntry<float> FallWithShot { get; private set; }
         internal static ConfigEntry<bool> ScaleByBullet { get; private set; }
         internal static ConfigEntry<float> ExplosionPush { get; private set; }
+        internal static ConfigEntry<float> CarryLimbMotion { get; private set; }
+        internal static ConfigEntry<float> LimbSpeedLimit { get; private set; }
         internal static ConfigEntry<bool> PerformanceLogging { get; private set; }
         internal static ConfigEntry<bool> PreviewEnabled { get; private set; }
         internal static ConfigEntry<PreviewMotion> PreviewMode { get; private set; }
@@ -141,8 +143,16 @@ namespace RagdollKinetics
             ExplosionPush = Range(config, Collapse, "ExplosionPush", 3.5f,
                 "Push in m/s from a strength-100 grenade at point-blank range, falling off with the square of the distance to nothing at its blast radius; limbs take more than the torso, unevenly, so bodies fold rather than fly. At the default an F-1 knocks a body back about 0.8 m at 1 m, 0.3 m at 2 m and barely at 4 m. Applies to bots killed by the blast and to fresh corpses that are still moving; settled, frozen corpses do not react.",
                 0f, 10f, "Explosion Push", 430);
+            CarryLimbMotion = Range(config, Collapse, "CarryLimbMotion", 1f,
+                "How much of each body part's own motion at the moment of death carries into the fall: a running bot's legs and arms keep their swing and a turning bot keeps turning, instead of every part starting at the body's speed with no spin. Needs the Future Animation Skeleton. 0 starts every part at the body's speed.",
+                0f, 1.5f, "Carry Limb Motion", 425);
+            LimbSpeedLimit = Range(config, Collapse, "LimbSpeedLimit", 20f,
+                "Fastest a body part may spin, in radians per second. Higher lets heads and limbs whip and flail on impacts and falls; lower calms them. Earlier versions held every part to 12.",
+                7f, 50f, "Limb Speed Limit", 420);
             Round(FallWithShot);
             Round(ExplosionPush);
+            Round(CarryLimbMotion);
+            Round(LimbSpeedLimit);
             Round(LegToneLoss);
             Round(ArmToneLoss);
             Round(SpineToneLoss);
@@ -216,7 +226,7 @@ namespace RagdollKinetics
                 0.05f, 8f, "World Follow Decay", 590);
             profile.BoneReplayStrength = Range(config, section,
                 "BoneReplayStrength", replayStrength,
-                "Relative joint strength used to replay the walk/run pose.",
+                "How firmly the joints hold the pose the bot died in while it plays out. Each joint's strength is scaled by the weight it carries, so hands and the head follow the pose as freely as the hips instead of being locked rigid.",
                 0f, 200f, "Bone Replay Strength", 580);
             profile.BoneReplayDecay = Range(config, section,
                 "BoneReplayDecay", replayDecay,
@@ -232,7 +242,7 @@ namespace RagdollKinetics
                 0.5f, 2f, "Joint Limit Range", 540);
             profile.JointLimitStiffness = Range(config, section,
                 "JointLimitStiffness", limitStiffness,
-                "Resistance applied only when a joint reaches its bend limit.",
+                "How firmly a joint is stopped at its bend limit, scaled by the weight it carries. At 10 no joint sags more than about 6 degrees past its limit under its own weight, and a spine or knee about 3; lower values let joints sag further past their limits; 0 makes the limits hard.",
                 0f, 100f, "Joint Limit Stiffness", 530);
             Round(profile.MomentumScale);
             Round(profile.MomentumDecay);
